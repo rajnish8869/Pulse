@@ -1,0 +1,49 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // --- Helper Functions ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+    
+    // --- Users Collection ---
+    // Users can read/write their own profile
+    // Others can read basic profiles (needed for finding contacts/callers)
+    match /users/{userId} {
+      allow create: if isSignedIn() && request.auth.uid == userId;
+      allow update: if isOwner(userId);
+      allow read: if isSignedIn();
+    }
+
+    // --- Calls Collection ---
+    match /calls/{callId} {
+      // 1. Create: Authenticated users can start a call
+      allow create: if isSignedIn();
+      
+      // 2. Read: Users can only see calls where they are caller or callee
+      allow read: if isSignedIn() && (
+        resource.data.callerId == request.auth.uid || 
+        resource.data.calleeId == request.auth.uid
+      );
+
+      // 3. Update: Participants can update call status
+      allow update: if isSignedIn() && (
+        resource.data.callerId == request.auth.uid || 
+        resource.data.calleeId == request.auth.uid
+      );
+      
+      // --- WebRTC Signaling Subcollections ---
+      match /offerCandidates/{candidateId} {
+        allow read, write: if isSignedIn();
+      }
+      match /answerCandidates/{candidateId} {
+        allow read, write: if isSignedIn();
+      }
+    }
+  }
+}

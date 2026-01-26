@@ -1,0 +1,8 @@
+{
+  "name": "Pulse",
+  "description": "A realtime walkie-talkie and calling application using free-tier technologies.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
