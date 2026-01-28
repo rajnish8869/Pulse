@@ -9,6 +9,9 @@ export class WebRTCService {
   public remoteStream: MediaStream | null = null;
   private onRemoteStreamCallback: ((stream: MediaStream) => void) | null = null;
   private onIceCandidateCallback: ((candidate: RTCIceCandidate) => void) | null = null;
+  
+  private candidateQueue: RTCIceCandidateInit[] = [];
+  private isRemoteDescriptionSet = false;
 
   constructor() {
     this.peerConnection = new RTCPeerConnection(STUN_SERVERS);
@@ -25,11 +28,17 @@ export class WebRTCService {
     };
 
     this.peerConnection.ontrack = (event) => {
+      // Create remote stream if not exists
+      if (!this.remoteStream) {
+        this.remoteStream = new MediaStream();
+      }
+      
       event.streams[0].getTracks().forEach((track) => {
         this.remoteStream?.addTrack(track);
       });
-      if (this.onRemoteStreamCallback && event.streams[0]) {
-        this.onRemoteStreamCallback(event.streams[0]);
+      
+      if (this.onRemoteStreamCallback && this.remoteStream) {
+        this.onRemoteStreamCallback(this.remoteStream);
       }
     };
   }
@@ -41,12 +50,16 @@ export class WebRTCService {
         video: video
       });
       this.localStream = stream;
-      this.remoteStream = new MediaStream();
-
-      // Add tracks to peer connection
+      
+      // Ensure tracks are added
       this.localStream.getTracks().forEach((track) => {
         if (this.peerConnection) {
-          this.peerConnection.addTrack(track, this.localStream!);
+            // Check if track already added to avoid "Track already exists" error
+            const senders = this.peerConnection.getSenders();
+            const exists = senders.find(s => s.track === track);
+            if (!exists) {
+                this.peerConnection.addTrack(track, this.localStream!);
+            }
         }
       });
 
@@ -74,7 +87,7 @@ export class WebRTCService {
 
   public async createAnswer(offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> {
     if (!this.peerConnection) throw new Error("No PeerConnection");
-    await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+    await this.setRemoteDescription(offer);
     const answer = await this.peerConnection.createAnswer();
     await this.peerConnection.setLocalDescription(answer);
     return answer;
@@ -83,17 +96,44 @@ export class WebRTCService {
   public async addAnswer(answer: RTCSessionDescriptionInit) {
     if (!this.peerConnection) return;
     if (!this.peerConnection.currentRemoteDescription) {
-      await this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+      await this.setRemoteDescription(answer);
     }
+  }
+
+  public async setRemoteDescription(desc: RTCSessionDescriptionInit) {
+      if (!this.peerConnection) return;
+      await this.peerConnection.setRemoteDescription(new RTCSessionDescription(desc));
+      this.isRemoteDescriptionSet = true;
+      await this.processCandidateQueue();
   }
 
   public async addIceCandidate(candidate: RTCIceCandidateInit) {
     if (!this.peerConnection) return;
+    
+    if (!this.isRemoteDescriptionSet) {
+        this.candidateQueue.push(candidate);
+        return;
+    }
+
     try {
       await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (e) {
       console.error("Error adding ice candidate", e);
     }
+  }
+
+  private async processCandidateQueue() {
+      if (!this.peerConnection) return;
+      while (this.candidateQueue.length > 0) {
+          const candidate = this.candidateQueue.shift();
+          if (candidate) {
+              try {
+                  await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+              } catch (e) {
+                  console.error("Error processing queued candidate", e);
+              }
+          }
+      }
   }
 
   public onRemoteStream(callback: (stream: MediaStream) => void) {
@@ -110,5 +150,7 @@ export class WebRTCService {
     this.peerConnection = null;
     this.localStream = null;
     this.remoteStream = null;
+    this.candidateQueue = [];
+    this.isRemoteDescriptionSet = false;
   }
 }

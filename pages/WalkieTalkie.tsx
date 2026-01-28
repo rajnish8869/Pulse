@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+
+import React, { useState, useEffect, useRef } from 'react';
 import { useCall } from '../context/CallContext';
 import { CallStatus, CallType, UserProfile } from '../types';
 import { Radio, Volume2, User as UserIcon, Loader2, AlertTriangle } from 'lucide-react';
@@ -17,8 +18,12 @@ const WalkieTalkie: React.FC = () => {
     const [selectedFriend, setSelectedFriend] = useState<UserProfile | null>(null);
     const [users, setUsers] = useState<UserProfile[]>([]);
     const [isHoldingButton, setIsHoldingButton] = useState(false);
-    const [isReady, setIsReady] = useState(false); // Used to unlock audio context
+    const [isReady, setIsReady] = useState(false); 
     const [permissionDenied, setPermissionDenied] = useState(false);
+    
+    // Prevent double calling
+    const [isInitiating, setIsInitiating] = useState(false);
+    const lastCalledId = useRef<string | null>(null);
 
     // 1. Fetch Users
     useEffect(() => {
@@ -38,25 +43,35 @@ const WalkieTalkie: React.FC = () => {
     }, [user]);
 
     // 2. Auto-Connect Logic
-    // When a friend is selected, ensure we are connected to them
     useEffect(() => {
-        if (!selectedFriend || !user || !isReady) return;
+        if (!selectedFriend || !user || !isReady || isInitiating) return;
 
-        // If we are already connected to someone else, end it
-        if (activeCall && activeCall.activeSpeakerId === undefined && (activeCall.calleeId !== selectedFriend.uid && activeCall.callerId !== selectedFriend.uid)) {
-            endCall();
-        }
-
-        // Check if we need to start a new connection
-        // We only start if no active call exists, or if the active call is ended
+        // If connected to someone else, or if the call state is broken
         const isConnectedToFriend = activeCall && 
             (activeCall.calleeId === selectedFriend.uid || activeCall.callerId === selectedFriend.uid) &&
-            (callStatus === CallStatus.CONNECTED || callStatus === CallStatus.OFFERING);
+            (callStatus === CallStatus.CONNECTED || callStatus === CallStatus.OFFERING || callStatus === CallStatus.RINGING);
 
-        // Don't auto-call if we are receiving an incoming call from someone else
+        // Disconnect if we switched friends
+        if (activeCall && !isConnectedToFriend && callStatus !== CallStatus.ENDED) {
+             endCall();
+             setIsInitiating(false);
+             lastCalledId.current = null;
+             return;
+        }
+
+        // Connect if not connected and no incoming call
         if (!isConnectedToFriend && !incomingCall && callStatus === CallStatus.ENDED) {
+            // Check if we just tried this friend to prevent rapid loops if it fails
+            if (lastCalledId.current === selectedFriend.uid && Date.now() - (activeCall?.endedAt || 0) < 2000) {
+                return;
+            }
+
             console.log("Auto-connecting to", selectedFriend.displayName);
-            makeCall(selectedFriend.uid, selectedFriend.displayName, CallType.PTT);
+            setIsInitiating(true);
+            lastCalledId.current = selectedFriend.uid;
+            
+            makeCall(selectedFriend.uid, selectedFriend.displayName, CallType.PTT)
+                .finally(() => setIsInitiating(false));
         }
     }, [selectedFriend, isReady, activeCall, callStatus, incomingCall]);
 
@@ -67,9 +82,8 @@ const WalkieTalkie: React.FC = () => {
     
     // Remote talking state comes from Firestore metadata now
     const isRemoteTalking = activeCall?.activeSpeakerId && activeCall.activeSpeakerId !== user?.uid;
-    const isLocalTalking = isHoldingButton; // Immediate feedback
+    const isLocalTalking = isHoldingButton; 
 
-    // Find the friend object for the current interaction
     const currentFriendId = activeCall ? (activeCall.callerId === user?.uid ? activeCall.calleeId : activeCall.callerId) : selectedFriend?.uid;
     const activeFriend = users.find(u => u.uid === currentFriendId) || selectedFriend;
 
@@ -94,12 +108,8 @@ const WalkieTalkie: React.FC = () => {
     const activateApp = async () => {
         setPermissionDenied(false);
         try {
-            // Explicitly request permission on user interaction to satisfy browser policies
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            
-            // Release the stream immediately, we just needed the permission grant
             stream.getTracks().forEach(track => track.stop());
-
             ensureAudioContext();
             setIsReady(true);
         } catch (e) {
