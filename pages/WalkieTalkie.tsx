@@ -38,23 +38,21 @@ const WalkieTalkie: React.FC = () => {
         fetchUsers();
     }, [user]);
 
-    // Handle Auto-Connect logic for PTT
+    // Handle Auto-Connect logic for PTT - Connect to selected friend when idle
     useEffect(() => {
         if (!selectedFriend || !user || !isReady || isInitiating) return;
 
         const isCurrentSessionWithFriend = activeCall && 
             (activeCall.calleeId === selectedFriend.uid || activeCall.callerId === selectedFriend.uid);
 
-        // If switching friends, end existing call
         if (activeCall && !isCurrentSessionWithFriend && callStatus !== CallStatus.ENDED) {
              endCall();
              return;
         }
 
-        // Auto-connect when idle
         if (!activeCall && !incomingCall && callStatus === CallStatus.ENDED) {
             setIsInitiating(true);
-            const delay = 500 + (Math.random() * 500); // Random offset to avoid simultaneous signaling
+            const delay = 500 + (Math.random() * 800); 
             const timer = setTimeout(() => {
                 makeCall(selectedFriend.uid, selectedFriend.displayName, CallType.PTT)
                     .finally(() => setIsInitiating(false));
@@ -66,7 +64,7 @@ const WalkieTalkie: React.FC = () => {
     // Handle Auto-Answer logic for PTT
     useEffect(() => {
         if (incomingCall && incomingCall.type === CallType.PTT && callStatus === CallStatus.RINGING) {
-            console.log("[PULSE-DEBUG] Auto-answering incoming PTT");
+            console.log("[PULSE-DEBUG] PTT incoming. Triggering auto-answer.");
             answerCall();
         }
     }, [incomingCall, callStatus]);
@@ -114,12 +112,12 @@ const WalkieTalkie: React.FC = () => {
                 <div className="w-32 h-32 rounded-full bg-secondary flex items-center justify-center mb-8 animate-pulse shadow-[0_0_50px_rgba(59,130,246,0.3)]">
                     <Radio size={48} className="text-primary" />
                 </div>
-                <h2 className="text-2xl font-bold mb-4">Pulse Walkie</h2>
-                <p className="text-gray-400 text-center mb-8">Go online to hear and talk to your friends instantly.</p>
+                <h2 className="text-2xl font-bold mb-4 tracking-tight">Pulse Walkie</h2>
+                <p className="text-gray-400 text-center mb-8 text-sm">Real-time voice with your friends. Tap to go online.</p>
                 {permissionDenied && (
                     <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-start gap-3 w-full max-w-xs">
                         <AlertTriangle className="text-red-500 shrink-0 mt-0.5" size={20} />
-                        <p className="text-red-300 text-xs">Microphone access is required for Pulse.</p>
+                        <p className="text-red-300 text-xs">Mic access is required to use Pulse.</p>
                     </div>
                 )}
                 <button onClick={activateApp} className="w-full max-w-xs py-4 bg-primary text-white font-bold rounded-2xl shadow-lg active:scale-95 transition-transform">
@@ -148,21 +146,21 @@ const WalkieTalkie: React.FC = () => {
             </div>
             
             <div className="flex-1 relative flex flex-col items-center justify-center p-6">
-                <div className="mb-6 h-6">
+                <div className="mb-8 h-8 flex items-center">
                     {isHoldingButton ? (
-                        <div className="bg-accent/20 text-accent px-4 py-1 rounded-full text-[10px] font-black animate-pulse flex items-center gap-2">
-                            <div className="w-1.5 h-1.5 rounded-full bg-accent"></div> LIVE TRANSMISSION
+                        <div className="bg-accent/20 text-accent px-4 py-1 rounded-full text-[10px] font-black animate-pulse flex items-center gap-2 border border-accent/30">
+                            <div className="w-1.5 h-1.5 rounded-full bg-accent"></div> SPEAKING
                         </div>
                     ) : isRemoteTalking ? (
-                        <div className="bg-green-500/20 text-green-500 px-4 py-1 rounded-full text-[10px] font-black animate-pulse flex items-center gap-2">
-                            <div className="w-1.5 h-1.5 rounded-full bg-green-500"></div> RECEIVING AUDIO
+                        <div className="bg-green-500/20 text-green-500 px-4 py-1 rounded-full text-[10px] font-black animate-pulse flex items-center gap-2 border border-green-500/30">
+                            <div className="w-1.5 h-1.5 rounded-full bg-green-500"></div> LISTENING
                         </div>
                     ) : isConnecting ? (
                         <div className="text-gray-400 text-[10px] font-bold flex items-center gap-2">
-                            <Loader2 size={12} className="animate-spin"/> SYNCHRONIZING CHANNEL...
+                            <Loader2 size={12} className="animate-spin text-primary"/> SECURING CHANNEL...
                         </div>
                     ) : (
-                        <div className="text-gray-600 text-[10px] font-bold tracking-[0.2em] uppercase">Channel Standby</div>
+                        <div className="text-gray-600 text-[10px] font-bold tracking-[0.3em] uppercase opacity-50">Channel Standby</div>
                     )}
                 </div>
 
@@ -174,7 +172,6 @@ const WalkieTalkie: React.FC = () => {
                     onTouchStart={handleTouchStart} 
                     onTouchEnd={handleTouchEnd}
                 >
-                    {/* Pulsing Visualizer Rings */}
                     {(isHoldingButton || isRemoteTalking) && (
                         <>
                             <div className={`absolute inset-0 rounded-full animate-ping opacity-20 ${isRemoteTalking ? 'bg-green-500' : 'bg-accent'}`}></div>
@@ -195,22 +192,15 @@ const WalkieTalkie: React.FC = () => {
                              <h2 className="text-3xl font-black text-white px-4 tracking-tight drop-shadow-lg">{activeFriend?.displayName || "Select Partner"}</h2>
                         </div>
                     </div>
-                    
-                    {/* Interaction Hint Overlay */}
-                    {!isConnected && !isConnecting && (
-                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                            <div className="bg-dark/80 backdrop-blur-md px-4 py-2 rounded-xl text-xs font-bold border border-gray-700">Connecting...</div>
-                        </div>
-                    )}
                 </div>
 
                 <div className="mt-14 flex flex-col items-center gap-3">
                      <div className="flex items-center gap-2 text-gray-500 opacity-50">
                         <Volume2 size={16} />
-                        <span className="text-[10px] font-mono tracking-widest uppercase">{isConnected ? 'Encrypted Link Active' : 'Offline'}</span>
+                        <span className="text-[10px] font-mono tracking-[0.2em] uppercase">{isConnected ? 'Active' : 'Offline'}</span>
                      </div>
-                     <p className="text-[11px] text-gray-400 font-medium text-center max-w-[200px]">
-                        {isHoldingButton ? 'Talk now...' : isRemoteTalking ? `${activeFriend?.displayName} is talking` : isConnected ? 'Hold avatar to speak' : 'Finding channel...'}
+                     <p className="text-[11px] text-gray-400 font-medium text-center tracking-wide">
+                        {isHoldingButton ? 'Now speaking...' : isRemoteTalking ? `${activeFriend?.displayName} is talking` : isConnected ? 'Hold to talk' : 'Syncing...'}
                      </p>
                 </div>
             </div>
