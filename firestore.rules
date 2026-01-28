@@ -6,35 +6,38 @@ service cloud.firestore {
       return request.auth != null;
     }
     
-    // Users: Read/Write own profile
+    function isParticipant(callId) {
+      let call = get(/databases/$(database)/documents/calls/$(callId)).data;
+      return isSignedIn() && (call.callerId == request.auth.uid || call.calleeId == request.auth.uid);
+    }
+
+    // Users: Read profiles to find friends, only write own presence/profile
     match /users/{userId} {
       allow read: if isSignedIn();
       allow write: if isSignedIn() && request.auth.uid == userId;
     }
 
-    // Calls: 
-    // - Create: Any signed in user
-    // - Read: Only participants
-    // - Update: Only participants
+    // Calls: participants only
     match /calls/{callId} {
-      allow create: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.callerId == request.auth.uid;
       
       allow read: if isSignedIn() && (
         resource.data.callerId == request.auth.uid || 
         resource.data.calleeId == request.auth.uid
       );
 
+      // Only status and signaling fields (answer/activeSpeakerId) should be updated by participants
       allow update: if isSignedIn() && (
         resource.data.callerId == request.auth.uid || 
         resource.data.calleeId == request.auth.uid
       );
       
-      // WebRTC Signaling: Participants can read/write candidates
+      // Strict signaling subcollection rules
       match /offerCandidates/{candidateId} {
-        allow read, write: if isSignedIn();
+        allow read, write: if isParticipant(callId);
       }
       match /answerCandidates/{candidateId} {
-        allow read, write: if isSignedIn();
+        allow read, write: if isParticipant(callId);
       }
     }
   }

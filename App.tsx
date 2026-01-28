@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { CallProvider } from './context/CallContext';
-import { db } from './services/firebase';
 import Login from './pages/Login';
 import BottomNav from './components/BottomNav';
 import CallHistory from './pages/CallHistory';
@@ -9,18 +8,12 @@ import WalkieTalkie from './pages/WalkieTalkie';
 import Contacts from './pages/Contacts';
 import ActiveCallModal from './components/ActiveCallModal';
 import { User, LogOut } from 'lucide-react';
-// import { App as CapacitorApp } from '@capacitor/app'; // Assuming standard capacitor usage
 
 const AppContent: React.FC = () => {
   const { user, loading, signOut } = useAuth();
   const [page, setPage] = useState('ptt'); // Default to PTT for Ten Ten feel
 
-  // Request basic permissions early
   useEffect(() => {
-      navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => {
-          console.log("Microphone permission not yet granted");
-      });
-
       // Simple Back Button handling for web history
       const handleBack = (e: PopStateEvent) => {
           if (page !== 'ptt') {
@@ -31,7 +24,7 @@ const AppContent: React.FC = () => {
       return () => window.removeEventListener('popstate', handleBack);
   }, [page]);
 
-  if (loading) return <div className="h-screen flex items-center justify-center bg-dark text-white">Loading Pulse...</div>;
+  if (loading) return <div className="h-screen flex items-center justify-center bg-dark text-white font-sans">Loading Pulse...</div>;
   if (!user) return <Login />;
 
   const handleSignOut = () => {

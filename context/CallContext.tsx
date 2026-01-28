@@ -1,4 +1,3 @@
-
 import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
 import { 
   collection, doc, addDoc, updateDoc, onSnapshot, 
@@ -39,31 +38,42 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const rtcRef = useRef<WebRTCService | null>(null);
   const callUnsubRef = useRef<(() => void) | null>(null);
-  
-  // Audio handling
   const audioContextRef = useRef<AudioContext | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Initialize Remote Audio Element
   useEffect(() => {
+    console.log("[PULSE-DEBUG] CallProvider Mounting");
     remoteAudioRef.current = new Audio();
     remoteAudioRef.current.autoplay = true;
+    
+    // We'll init the RTC service on demand or keep one warm
+    rtcRef.current = new WebRTCService();
+    
+    rtcRef.current.onRemoteStream((stream) => {
+      console.log("[PULSE-DEBUG] Remote stream track received in context");
+      setRemoteStream(stream);
+      if (remoteAudioRef.current) {
+          remoteAudioRef.current.srcObject = stream;
+          remoteAudioRef.current.play().catch(e => console.warn("[PULSE-DEBUG] Audio play deferred:", e));
+      }
+    });
+
     return () => {
-        if(remoteAudioRef.current) {
-            remoteAudioRef.current.pause();
-            remoteAudioRef.current = null;
-        }
-    }
+        console.log("[PULSE-DEBUG] CallProvider Unmounting");
+        if(remoteAudioRef.current) remoteAudioRef.current.pause();
+        if(rtcRef.current) rtcRef.current.close();
+    };
   }, []);
 
   const ensureAudioContext = () => {
       if (!audioContextRef.current) {
           audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+          console.log("[PULSE-DEBUG] AudioContext Created");
       }
       if (audioContextRef.current.state === 'suspended') {
-          audioContextRef.current.resume();
+          audioContextRef.current.resume().then(() => console.log("[PULSE-DEBUG] AudioContext Resumed"));
       }
-      // Play silent buffer to unlock audio on iOS/Android WebViews
+      // Unlock audio on touch devices
       const buffer = audioContextRef.current.createBuffer(1, 1, 22050);
       const source = audioContextRef.current.createBufferSource();
       source.buffer = buffer;
@@ -75,13 +85,10 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
       ensureAudioContext();
       const ctx = audioContextRef.current;
       if (!ctx) return;
-
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      
       osc.connect(gain);
       gain.connect(ctx.destination);
-
       if (type === 'ON') {
           osc.frequency.setValueAtTime(800, ctx.currentTime);
           osc.frequency.exponentialRampToValueAtTime(1200, ctx.currentTime + 0.1);
@@ -89,36 +96,16 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
           osc.frequency.setValueAtTime(1200, ctx.currentTime);
           osc.frequency.exponentialRampToValueAtTime(800, ctx.currentTime + 0.1);
       }
-
       gain.gain.setValueAtTime(0.3, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
-
       osc.start();
       osc.stop(ctx.currentTime + 0.15);
   };
 
-  // Initialize WebRTC helper
-  useEffect(() => {
-    rtcRef.current = new WebRTCService();
-    
-    rtcRef.current.onRemoteStream((stream) => {
-      setRemoteStream(stream);
-      // Attach to persistent audio element
-      if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = stream;
-          remoteAudioRef.current.play().catch(e => console.error("Autoplay blocked", e));
-      }
-    });
-
-    return () => {
-      if (rtcRef.current) rtcRef.current.close();
-    };
-  }, []);
-
-  // Listen for incoming calls
+  // Incoming Call Listener
   useEffect(() => {
     if (!user || !db) return;
-
+    console.log("[PULSE-DEBUG] Subscribing to incoming calls for:", user.displayName);
     const q = query(
       collection(db, COLLECTIONS.CALLS),
       where('calleeId', '==', user.uid),
@@ -129,129 +116,97 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
       snapshot.docChanges().forEach((change) => {
         if (change.type === 'added') {
           const data = change.doc.data() as CallSession;
-          // Only accept if we aren't already in a call
+          console.log("[PULSE-DEBUG] Detected incoming call offering:", data.callId);
           if (callStatus === CallStatus.ENDED) {
             setIncomingCall(data);
             setCallStatus(CallStatus.RINGING);
           } else {
-             // Auto-reject busy
-             if (db) {
-                updateDoc(doc(db, COLLECTIONS.CALLS, data.callId), { status: 'BUSY' });
-             }
+             console.log("[PULSE-DEBUG] User busy, auto-rejecting call:", data.callId);
+             updateDoc(doc(db, COLLECTIONS.CALLS, data.callId), { status: 'BUSY' });
           }
         }
       });
-    }, (error) => {
-        console.error("Error listening for incoming calls:", error);
     });
-
     return () => unsubscribe();
-  }, [user, callStatus]);
+  }, [user?.uid, callStatus]);
 
-  // Auto-Answer PTT Calls
-  useEffect(() => {
-    if (incomingCall && incomingCall.type === CallType.PTT && callStatus === CallStatus.RINGING) {
-        console.log("Auto-answering PTT call from", incomingCall.callerName);
-        playTone('ON');
-        answerCall();
-    }
-  }, [incomingCall, callStatus]);
-
-  // Handle Active Call Signaling
+  // Signaling Orchestrator
   useEffect(() => {
     if (!activeCall || !db || !rtcRef.current || !user) return;
+    console.log("[PULSE-DEBUG] Signaling Orchestrator active for:", activeCall.callId);
 
     const callDocRef = doc(db, COLLECTIONS.CALLS, activeCall.callId);
 
-    // 1. Listen to Call Status Changes (End, Hangup, Speaker State)
     const unsubStatus = onSnapshot(callDocRef, async (snapshot) => {
         const data = snapshot.data();
         if (!data) return;
+        
+        console.log("[PULSE-DEBUG] Remote status change:", data.status);
 
-        // Remote user answered (Caller view)
         if (data.status === CallStatus.CONNECTED && callStatus === CallStatus.OFFERING) {
+            console.log("[PULSE-DEBUG] Connection confirmed by peer");
             setCallStatus(CallStatus.CONNECTED);
             if (activeCall.type === CallType.PTT) playTone('ON');
         }
 
-        // Active Speaker Visual State
         if (data.activeSpeakerId !== undefined) {
              setActiveCall(prev => prev ? ({ ...prev, activeSpeakerId: data.activeSpeakerId }) : null);
         }
 
-        // Call Ended
-        if (data.status === CallStatus.ENDED || data.status === CallStatus.REJECTED || data.status === 'BUSY') {
-             if (activeCall.type === CallType.PTT && callStatus === CallStatus.CONNECTED) playTone('OFF');
+        if (['ENDED', 'REJECTED', 'BUSY'].includes(data.status)) {
+             console.log("[PULSE-DEBUG] Call terminated via signaling state:", data.status);
              cleanupCall();
         }
 
-        // Handle Answer SDP (Caller Only)
+        // Caller side: process answer SDP
         if (activeCall.callerId === user.uid && data.answer) {
+             console.log("[PULSE-DEBUG] Processing Answer SDP from peer");
              await rtcRef.current?.addAnswer(data.answer);
         }
     });
 
-    // 2. Handle ICE Candidates
-    let unsubCandidates = () => {};
-
-    if (activeCall.callerId === user.uid) {
-        // I am Caller: Listen for Answer Candidates (from Callee)
-        unsubCandidates = onSnapshot(collection(callDocRef, 'answerCandidates'), (snapshot) => {
-           snapshot.docChanges().forEach((change) => {
-               if (change.type === 'added') {
-                 rtcRef.current?.addIceCandidate(change.doc.data() as RTCIceCandidateInit);
-               }
-           });
-        });
-    } else {
-        // I am Callee: Listen for Offer Candidates (from Caller)
-        unsubCandidates = onSnapshot(collection(callDocRef, 'offerCandidates'), (snapshot) => {
-           snapshot.docChanges().forEach((change) => {
-               if (change.type === 'added') {
-                 rtcRef.current?.addIceCandidate(change.doc.data() as RTCIceCandidateInit);
-               }
-           });
-        });
-    }
+    const candidatesPath = activeCall.callerId === user.uid ? 'answerCandidates' : 'offerCandidates';
+    console.log("[PULSE-DEBUG] Listening for candidates in:", candidatesPath);
+    
+    const unsubCandidates = onSnapshot(collection(callDocRef, candidatesPath), (snapshot) => {
+       snapshot.docChanges().forEach((change) => {
+           if (change.type === 'added') {
+             console.log("[PULSE-DEBUG] Remote ICE candidate received");
+             rtcRef.current?.addIceCandidate(change.doc.data() as RTCIceCandidateInit);
+           }
+       });
+    });
     
     callUnsubRef.current = () => {
         unsubStatus();
         unsubCandidates();
     };
     
-    return () => {
-        if(callUnsubRef.current) callUnsubRef.current();
-    }
-  }, [activeCall?.callId, user?.uid]); // Only re-subscribe if call ID changes
+    return () => { if(callUnsubRef.current) callUnsubRef.current(); };
+  }, [activeCall?.callId, user?.uid]);
 
   const makeCall = async (calleeId: string, calleeName: string, type: CallType) => {
     if (!user || !db || !rtcRef.current) return;
-
+    console.log("[PULSE-DEBUG] Initializing makeCall to:", calleeName);
     ensureAudioContext();
 
     try {
-        // 1. Get Local Stream
         const stream = await rtcRef.current.startLocalStream(type === CallType.VIDEO);
         setLocalStream(stream);
 
-        if (type === CallType.PTT) {
-           rtcRef.current.toggleAudio(false);
-        } else {
-           playTone('ON');
-        }
+        if (type === CallType.PTT) rtcRef.current.toggleAudio(false);
+        else playTone('ON');
 
-        // 2. Create Offer
         const offer = await rtcRef.current.createOffer();
-
-        // 3. Create Call Document
         const callDocRef = doc(collection(db, COLLECTIONS.CALLS));
         const callId = callDocRef.id;
         
+        // CRITICAL FIX: Ensure no field is undefined for Firestore
         const callData: CallSession = {
           callId,
           callerId: user.uid,
           callerName: user.displayName || 'Unknown',
-          callerPhoto: user.photoURL || undefined, 
+          callerPhoto: user.photoURL || null, // FIX: Firestore does not allow undefined
           calleeId,
           calleeName,
           type,
@@ -260,95 +215,80 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
           activeSpeakerId: null,
         };
 
-        // Prepare Firestore operations
-        await setDoc(callDocRef, {
-            ...callData,
-            offer: { type: offer.type, sdp: offer.sdp }
+        console.log("[PULSE-DEBUG] Writing offer document to Firestore...");
+        await setDoc(callDocRef, { 
+            ...callData, 
+            offer: { type: offer.type, sdp: offer.sdp } 
         });
 
-        // Setup local candidate listener
         rtcRef.current.onIceCandidate(async (candidate) => {
-            if (db) {
-                await addDoc(collection(db, COLLECTIONS.CALLS, callId, 'offerCandidates'), candidate.toJSON());
-            }
+            console.log("[PULSE-DEBUG] Sending local ICE candidate to peer");
+            await addDoc(collection(db, COLLECTIONS.CALLS, callId, 'offerCandidates'), candidate.toJSON());
         });
 
         setActiveCall(callData);
         setCallStatus(CallStatus.OFFERING);
     } catch (e) {
-        console.error("Failed to start call:", e);
-        setCallStatus(CallStatus.ENDED);
-        setLocalStream(null);
+        console.error("[PULSE-DEBUG] Call initiation failed:", e);
+        cleanupCall();
     }
   };
 
   const answerCall = async () => {
     if (!incomingCall || !user || !db || !rtcRef.current) return;
-
+    console.log("[PULSE-DEBUG] Answering call:", incomingCall.callId);
     ensureAudioContext();
 
     try {
-        // 1. Get Local Stream
         const stream = await rtcRef.current.startLocalStream(incomingCall.type === CallType.VIDEO);
         setLocalStream(stream);
+        if (incomingCall.type === CallType.PTT) rtcRef.current.toggleAudio(false);
 
-        if (incomingCall.type === CallType.PTT) {
-            rtcRef.current.toggleAudio(false);
-        }
-
-        // 2. Fetch Offer
         const callDocRef = doc(db, COLLECTIONS.CALLS, incomingCall.callId);
         const callDoc = await getDoc(callDocRef);
         const callData = callDoc.data();
         
-        if (callData && callData.offer) {
-            // 3. Create Answer
+        if (callData?.offer) {
+            console.log("[PULSE-DEBUG] Offer found, creating answer...");
             const answer = await rtcRef.current.createAnswer(callData.offer);
-            
             await updateDoc(callDocRef, {
                 status: CallStatus.CONNECTED,
                 answer: { type: answer.type, sdp: answer.sdp }
             });
 
-            // Setup local candidate listener
             rtcRef.current.onIceCandidate(async (candidate) => {
-                if (db) {
-                    await addDoc(collection(db, COLLECTIONS.CALLS, incomingCall.callId, 'answerCandidates'), candidate.toJSON());
-                }
+                console.log("[PULSE-DEBUG] Sending local answer candidate");
+                await addDoc(collection(db, COLLECTIONS.CALLS, incomingCall.callId, 'answerCandidates'), candidate.toJSON());
             });
 
-            // Signaling listener for candidates is handled in the useEffect via setActiveCall
             setActiveCall(incomingCall);
             setIncomingCall(null);
             setCallStatus(CallStatus.CONNECTED);
+        } else {
+            console.error("[PULSE-DEBUG] Offer document missing in Firestore");
         }
     } catch (e) {
-        console.error("Failed to answer call:", e);
-        setIncomingCall(null);
-        setCallStatus(CallStatus.ENDED);
-        setLocalStream(null);
+        console.error("[PULSE-DEBUG] Failed to answer call:", e);
+        cleanupCall();
     }
   };
 
   const toggleTalk = async (isTalking: boolean) => {
       if (!rtcRef.current || !activeCall || !db || !user) return;
-      
-      if (localStream) {
-          rtcRef.current.toggleAudio(isTalking);
-      }
+      console.log("[PULSE-DEBUG] Talk button toggled:", isTalking);
+      if (localStream) rtcRef.current.toggleAudio(isTalking);
 
       try {
-          // Use updateDoc only if call is still active/valid
-          const callRef = doc(db, COLLECTIONS.CALLS, activeCall.callId);
-          await updateDoc(callRef, {
+          await updateDoc(doc(db, COLLECTIONS.CALLS, activeCall.callId), {
               activeSpeakerId: isTalking ? user.uid : null
           });
       } catch (e) {
-          console.error("Error signaling talk state", e);
+          console.error("[PULSE-DEBUG] Failed to update speaker state:", e);
       }
   };
 
   const cleanupCall = () => {
+    console.log("[PULSE-DEBUG] Executing cleanup for call session");
     setCallStatus(CallStatus.ENDED);
     setActiveCall(null);
     setIncomingCall(null);
@@ -363,46 +303,31 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (rtcRef.current) {
         rtcRef.current.close();
         rtcRef.current = new WebRTCService();
-        // Re-attach persistent audio logic
         rtcRef.current.onRemoteStream((stream) => {
             setRemoteStream(stream);
-            if (remoteAudioRef.current) {
-                remoteAudioRef.current.srcObject = stream;
-                remoteAudioRef.current.play().catch(console.error);
-            }
+            if (remoteAudioRef.current) remoteAudioRef.current.srcObject = stream;
         });
     }
   };
 
   const endCall = async () => {
+    console.log("[PULSE-DEBUG] Manual hangup requested");
     if (activeCall?.type === CallType.PTT) playTone('OFF');
-    
     if (activeCall && db) {
-        const duration = Math.floor((Date.now() - activeCall.startedAt) / 1000);
-        try {
-            await updateDoc(doc(db, COLLECTIONS.CALLS, activeCall.callId), {
-                status: CallStatus.ENDED,
-                endedAt: Date.now(),
-                duration: duration
-            });
-        } catch (e) {
-            console.error("Error updating end call stat", e);
-        }
+        await updateDoc(doc(db, COLLECTIONS.CALLS, activeCall.callId), {
+            status: CallStatus.ENDED,
+            endedAt: Date.now()
+        }).catch(e => console.error("[PULSE-DEBUG] Failed to signal end call:", e));
     }
     cleanupCall();
   };
 
   const rejectCall = async () => {
+      console.log("[PULSE-DEBUG] Call rejection requested");
       if (incomingCall && db) {
-        try {
-            await updateDoc(doc(db, COLLECTIONS.CALLS, incomingCall.callId), {
-                status: CallStatus.REJECTED,
-                endedAt: Date.now(),
-                duration: 0
-            });
-        } catch (e) {
-            console.error("Error rejecting call", e);
-        }
+        await updateDoc(doc(db, COLLECTIONS.CALLS, incomingCall.callId), {
+            status: CallStatus.REJECTED
+        }).catch(e => console.error("[PULSE-DEBUG] Failed to signal reject call:", e));
       }
       setIncomingCall(null);
       setCallStatus(CallStatus.ENDED);
@@ -410,18 +335,9 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   return (
     <CallContext.Provider value={{
-      activeCall,
-      incomingCall,
-      callStatus,
-      makeCall,
-      answerCall,
-      rejectCall,
-      endCall,
-      toggleTalk,
-      remoteStream,
-      localStream,
-      playTone,
-      ensureAudioContext
+      activeCall, incomingCall, callStatus,
+      makeCall, answerCall, rejectCall, endCall,
+      toggleTalk, remoteStream, localStream, playTone, ensureAudioContext
     }}>
       {children}
     </CallContext.Provider>

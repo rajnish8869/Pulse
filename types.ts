@@ -1,4 +1,3 @@
-
 export enum CallType {
   AUDIO = 'AUDIO',
   VIDEO = 'VIDEO',
@@ -27,15 +26,15 @@ export interface CallSession {
   callId: string;
   callerId: string;
   callerName: string;
-  callerPhoto?: string;
+  callerPhoto: string | null;
   calleeId: string;
-  calleeName: string; // Denormalized for simpler list views
+  calleeName: string;
   type: CallType;
   status: CallStatus;
   startedAt: number;
-  endedAt?: number;
-  duration?: number;
-  activeSpeakerId?: string | null; // For PTT visual feedback
+  endedAt?: number | null;
+  duration?: number | null;
+  activeSpeakerId?: string | null;
 }
 
 export interface WebRTCSignal {

@@ -1,7 +1,4 @@
-
 import { STUN_SERVERS } from '../constants';
-
-type SignalCallback = (data: any) => void;
 
 export class WebRTCService {
   public peerConnection: RTCPeerConnection | null = null;
@@ -14,6 +11,11 @@ export class WebRTCService {
   private isRemoteDescriptionSet = false;
 
   constructor() {
+    console.log("[PULSE-DEBUG] Initializing WebRTCService Instance...");
+    this.initPC();
+  }
+
+  private initPC() {
     this.peerConnection = new RTCPeerConnection(STUN_SERVERS);
     this.setupEventListeners();
   }
@@ -22,55 +24,67 @@ export class WebRTCService {
     if (!this.peerConnection) return;
 
     this.peerConnection.onicecandidate = (event) => {
-      if (event.candidate && this.onIceCandidateCallback) {
-        this.onIceCandidateCallback(event.candidate);
+      if (event.candidate) {
+        console.log("[PULSE-DEBUG] Local ICE candidate generated:", event.candidate.candidate.substring(0, 30) + "...");
+        if (this.onIceCandidateCallback) this.onIceCandidateCallback(event.candidate);
       }
     };
 
+    this.peerConnection.oniceconnectionstatechange = () => {
+        const state = this.peerConnection?.iceConnectionState;
+        console.log("[PULSE-DEBUG] ICE Connection State:", state);
+    };
+
+    this.peerConnection.onsignalingstatechange = () => {
+        console.log("[PULSE-DEBUG] Signaling State:", this.peerConnection?.signalingState);
+    };
+
     this.peerConnection.ontrack = (event) => {
-      // Create remote stream if not exists
+      console.log("[PULSE-DEBUG] Remote track received:", event.track.kind);
+      
       if (!this.remoteStream) {
         this.remoteStream = new MediaStream();
       }
       
-      event.streams[0].getTracks().forEach((track) => {
-        this.remoteStream?.addTrack(track);
-      });
+      this.remoteStream.addTrack(event.track);
       
-      if (this.onRemoteStreamCallback && this.remoteStream) {
+      if (this.onRemoteStreamCallback) {
         this.onRemoteStreamCallback(this.remoteStream);
       }
     };
   }
 
-  public async startLocalStream(video: boolean = false): Promise<MediaStream> {
+  public async startLocalStream(videoRequested: boolean = false): Promise<MediaStream> {
+    console.log("[PULSE-DEBUG] Requesting media stream. Video Requested:", videoRequested);
+    
+    // Constraints must be specific to avoid "Starting videoinput failed" 
+    // when camera is blocked or unavailable but not actually needed.
+    const constraints: MediaStreamConstraints = {
+      audio: true,
+      video: videoRequested ? { facingMode: 'user' } : false
+    };
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: video
-      });
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      console.log("[PULSE-DEBUG] getUserMedia Success. Stream ID:", stream.id);
       this.localStream = stream;
       
-      // Ensure tracks are added
-      this.localStream.getTracks().forEach((track) => {
-        if (this.peerConnection) {
-            // Check if track already added to avoid "Track already exists" error
-            const senders = this.peerConnection.getSenders();
-            const exists = senders.find(s => s.track === track);
-            if (!exists) {
-                this.peerConnection.addTrack(track, this.localStream!);
-            }
-        }
-      });
+      if (this.peerConnection) {
+          this.localStream.getTracks().forEach((track) => {
+              console.log("[PULSE-DEBUG] Adding local track to PC:", track.kind);
+              this.peerConnection?.addTrack(track, this.localStream!);
+          });
+      }
 
       return stream;
     } catch (error) {
-      console.error("Error accessing media devices:", error);
+      console.error("[PULSE-DEBUG] Media Access Error:", error);
       throw error;
     }
   }
 
   public toggleAudio(enabled: boolean) {
+    console.log("[PULSE-DEBUG] Audio Track Toggle:", enabled);
     if (this.localStream) {
       this.localStream.getAudioTracks().forEach(track => {
         track.enabled = enabled;
@@ -79,14 +93,16 @@ export class WebRTCService {
   }
 
   public async createOffer(): Promise<RTCSessionDescriptionInit> {
-    if (!this.peerConnection) throw new Error("No PeerConnection");
+    if (!this.peerConnection) throw new Error("No PeerConnection during Offer creation");
+    console.log("[PULSE-DEBUG] Creating WebRTC Offer...");
     const offer = await this.peerConnection.createOffer();
     await this.peerConnection.setLocalDescription(offer);
     return offer;
   }
 
   public async createAnswer(offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> {
-    if (!this.peerConnection) throw new Error("No PeerConnection");
+    if (!this.peerConnection) throw new Error("No PeerConnection during Answer creation");
+    console.log("[PULSE-DEBUG] Processing remote offer and creating answer...");
     await this.setRemoteDescription(offer);
     const answer = await this.peerConnection.createAnswer();
     await this.peerConnection.setLocalDescription(answer);
@@ -95,42 +111,51 @@ export class WebRTCService {
 
   public async addAnswer(answer: RTCSessionDescriptionInit) {
     if (!this.peerConnection) return;
-    if (!this.peerConnection.currentRemoteDescription) {
+    if (this.peerConnection.signalingState !== 'stable') {
+      console.log("[PULSE-DEBUG] Signaling Answer received, adding to connection");
       await this.setRemoteDescription(answer);
     }
   }
 
   public async setRemoteDescription(desc: RTCSessionDescriptionInit) {
       if (!this.peerConnection) return;
-      await this.peerConnection.setRemoteDescription(new RTCSessionDescription(desc));
-      this.isRemoteDescriptionSet = true;
-      await this.processCandidateQueue();
+      try {
+        console.log("[PULSE-DEBUG] Setting Remote Description:", desc.type);
+        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(desc));
+        this.isRemoteDescriptionSet = true;
+        await this.processCandidateQueue();
+      } catch (e) {
+        console.error("[PULSE-DEBUG] Remote Description Failure:", e);
+      }
   }
 
   public async addIceCandidate(candidate: RTCIceCandidateInit) {
     if (!this.peerConnection) return;
     
     if (!this.isRemoteDescriptionSet) {
+        console.log("[PULSE-DEBUG] Candidate arrival before RemoteDesc. Queuing...");
         this.candidateQueue.push(candidate);
         return;
     }
 
     try {
       await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      console.log("[PULSE-DEBUG] Remote Candidate Handled");
     } catch (e) {
-      console.error("Error adding ice candidate", e);
+      console.error("[PULSE-DEBUG] Candidate processing error:", e);
     }
   }
 
   private async processCandidateQueue() {
       if (!this.peerConnection) return;
+      console.log("[PULSE-DEBUG] Flushing queued candidates:", this.candidateQueue.length);
       while (this.candidateQueue.length > 0) {
           const candidate = this.candidateQueue.shift();
           if (candidate) {
               try {
                   await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
               } catch (e) {
-                  console.error("Error processing queued candidate", e);
+                  console.error("[PULSE-DEBUG] Queued candidate failure:", e);
               }
           }
       }
@@ -145,6 +170,7 @@ export class WebRTCService {
   }
 
   public close() {
+    console.log("[PULSE-DEBUG] Destroying WebRTC session...");
     this.localStream?.getTracks().forEach(track => track.stop());
     this.peerConnection?.close();
     this.peerConnection = null;
