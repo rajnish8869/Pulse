@@ -1,7 +1,8 @@
+
 import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
 import { 
   collection, doc, addDoc, updateDoc, onSnapshot, 
-  query, where, setDoc, getDoc 
+  query, where, setDoc, getDoc, deleteDoc 
 } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import { useAuth } from './AuthContext';
@@ -22,6 +23,7 @@ interface CallContextType {
   localStream: MediaStream | null;
   playTone: (type: 'ON' | 'OFF') => void;
   ensureAudioContext: () => void;
+  remoteAudioRef: React.RefObject<HTMLAudioElement>;
 }
 
 const CallContext = createContext<CallContextType>({} as CallContextType);
@@ -39,38 +41,29 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const rtcRef = useRef<WebRTCService | null>(null);
   const callUnsubRef = useRef<(() => void) | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
   
   const statusRef = useRef<CallStatus>(CallStatus.ENDED);
   const activeCallRef = useRef<CallSession | null>(null);
 
-  useEffect(() => {
-    statusRef.current = callStatus;
-  }, [callStatus]);
+  useEffect(() => { statusRef.current = callStatus; }, [callStatus]);
+  useEffect(() => { activeCallRef.current = activeCall; }, [activeCall]);
 
+  // Persistent WebRTC instance for listening/ready state
   useEffect(() => {
-    activeCallRef.current = activeCall;
-  }, [activeCall]);
-
-  useEffect(() => {
-    console.log("[PULSE-DEBUG] CallProvider Initializing");
-    remoteAudioRef.current = new Audio();
-    remoteAudioRef.current.autoplay = true;
-    
-    rtcRef.current = new WebRTCService();
-    
-    rtcRef.current.onRemoteStream((stream) => {
-      console.log("[PULSE-DEBUG] Remote stream attached to context");
-      setRemoteStream(stream);
-      if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = stream;
-          remoteAudioRef.current.play().catch(e => console.warn("[PULSE-DEBUG] Audio play deferred:", e));
-      }
-    });
-
-    return () => {
-        if(rtcRef.current) rtcRef.current.close();
+    const initRTC = () => {
+        console.log("[PULSE-DEBUG] Initializing WebRTC for CallProvider");
+        rtcRef.current = new WebRTCService();
+        rtcRef.current.onRemoteStream((stream) => {
+          setRemoteStream(stream);
+          if (remoteAudioRef.current) {
+              remoteAudioRef.current.srcObject = stream;
+              remoteAudioRef.current.play().catch(() => {});
+          }
+        });
     };
+    initRTC();
+    return () => { if(rtcRef.current) rtcRef.current.close(); };
   }, []);
 
   const ensureAudioContext = () => {
@@ -79,6 +72,10 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       if (audioContextRef.current.state === 'suspended') {
           audioContextRef.current.resume();
+      }
+      // "Bless" the audio element for future WebRTC streams
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.play().catch(() => {});
       }
   };
 
@@ -90,15 +87,15 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const gain = ctx.createGain();
       osc.connect(gain);
       gain.connect(ctx.destination);
-      osc.frequency.setValueAtTime(type === 'ON' ? 800 : 1200, ctx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(type === 'ON' ? 1200 : 800, ctx.currentTime + 0.1);
-      gain.gain.setValueAtTime(0.2, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
+      osc.frequency.setValueAtTime(type === 'ON' ? 600 : 400, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(type === 'ON' ? 900 : 300, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      gain.gain.linearRampToValueAtTime(0.01, ctx.currentTime + 0.2);
       osc.start();
-      osc.stop(ctx.currentTime + 0.15);
+      osc.stop(ctx.currentTime + 0.2);
   };
 
-  // Improved Incoming Call Listener with UID Tie-breaking
+  // Listen for incoming calls
   useEffect(() => {
     if (!user || !db) return;
     const q = query(
@@ -111,29 +108,10 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
       snapshot.docChanges().forEach(async (change) => {
         if (change.type === 'added') {
           const data = change.doc.data() as CallSession;
-          const currentStatus = statusRef.current;
-          const currentActive = activeCallRef.current;
-
-          // Conflict resolution: simultaneous calling
-          if ((currentStatus === CallStatus.OFFERING || currentStatus === CallStatus.RINGING) && currentActive?.calleeId === data.callerId) {
-             console.log("[PULSE-DEBUG] Double Call Conflict. Resolving...");
-             if (data.callerId < user.uid) {
-                // Incoming UID is smaller, I lose the tie-breaker and answer theirs
-                if (currentActive) await updateDoc(doc(db, COLLECTIONS.CALLS, currentActive.callId), { status: 'ENDED' });
-                setIncomingCall(data);
-                setCallStatus(CallStatus.RINGING);
-                return;
-             } else {
-                // I win the tie-breaker, keep my offer and ignore theirs
-                await updateDoc(doc(db, COLLECTIONS.CALLS, data.callId), { status: 'BUSY' });
-                return;
-             }
-          }
-
-          if (currentStatus === CallStatus.ENDED) {
+          if (statusRef.current === CallStatus.ENDED) {
             setIncomingCall(data);
             setCallStatus(CallStatus.RINGING);
-          } else {
+          } else if (data.callId !== activeCallRef.current?.callId) {
              await updateDoc(doc(db, COLLECTIONS.CALLS, data.callId), { status: 'BUSY' });
           }
         }
@@ -142,7 +120,7 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => unsubscribe();
   }, [user?.uid]);
 
-  // Signaling Orchestrator
+  // Active call monitoring
   useEffect(() => {
     if (!activeCall || !db || !rtcRef.current || !user) return;
     const callDocRef = doc(db, COLLECTIONS.CALLS, activeCall.callId);
@@ -276,7 +254,10 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
         rtcRef.current = new WebRTCService();
         rtcRef.current.onRemoteStream((stream) => {
             setRemoteStream(stream);
-            if (remoteAudioRef.current) remoteAudioRef.current.srcObject = stream;
+            if (remoteAudioRef.current) {
+                remoteAudioRef.current.srcObject = stream;
+                remoteAudioRef.current.play().catch(() => {});
+            }
         });
     }
   };
@@ -304,7 +285,8 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <CallContext.Provider value={{
       activeCall, incomingCall, callStatus,
       makeCall, answerCall, rejectCall, endCall,
-      toggleTalk, remoteStream, localStream, playTone, ensureAudioContext
+      toggleTalk, remoteStream, localStream, playTone, ensureAudioContext,
+      remoteAudioRef
     }}>
       {children}
     </CallContext.Provider>

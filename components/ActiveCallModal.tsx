@@ -1,13 +1,14 @@
+
 import React, { useEffect, useRef, useState } from 'react';
 import { useCall } from '../context/CallContext';
 import { CallStatus, CallType } from '../types';
-import { PhoneOff, Phone, Mic, MicOff, Video, VideoOff, Maximize2 } from 'lucide-react';
+import { PhoneOff, Phone, Mic, MicOff, Video, VideoOff } from 'lucide-react';
 
 const ActiveCallModal: React.FC = () => {
   const { 
     activeCall, incomingCall, callStatus, 
     answerCall, rejectCall, endCall, 
-    remoteStream, localStream 
+    remoteStream, localStream, remoteAudioRef 
   } = useCall();
 
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -28,14 +29,16 @@ const ActiveCallModal: React.FC = () => {
   }, [callStatus]);
 
   useEffect(() => {
-    if (remoteVideoRef.current && remoteStream) {
+    // For Video calls, we attach the stream to the video element.
+    // Audio is handled by the GlobalSink in App.tsx to prevent interruption if this modal unmounts.
+    if (activeCall?.type === CallType.VIDEO && remoteVideoRef.current && remoteStream) {
       remoteVideoRef.current.srcObject = remoteStream;
     }
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
       localVideoRef.current.muted = true; 
     }
-  }, [remoteStream, localStream, callStatus]);
+  }, [remoteStream, localStream, callStatus, activeCall?.type]);
 
   const formatTime = (seconds: number) => {
       const mins = Math.floor(seconds / 60);
@@ -43,6 +46,7 @@ const ActiveCallModal: React.FC = () => {
       return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Hide modal for PTT calls (Ten Ten style background walkie-talkie)
   if (incomingCall?.type === CallType.PTT || activeCall?.type === CallType.PTT) return null;
   if (!incomingCall && (!activeCall || callStatus === CallStatus.ENDED)) return null;
 
@@ -53,7 +57,7 @@ const ActiveCallModal: React.FC = () => {
         <div className="text-center space-y-6">
           <div className="w-32 h-32 rounded-full bg-gray-800 mx-auto overflow-hidden border-4 border-primary/30 shadow-[0_0_30px_rgba(59,130,246,0.2)]">
              {incomingCall.callerPhoto ? (
-                <img src={incomingCall.callerPhoto} className="w-full h-full object-cover" />
+                <img src={incomingCall.callerPhoto} className="w-full h-full object-cover" alt="" />
              ) : (
                 <div className="w-full h-full flex items-center justify-center text-4xl bg-gradient-to-br from-primary/20 to-accent/20">?</div>
              )}
@@ -82,7 +86,7 @@ const ActiveCallModal: React.FC = () => {
     );
   }
 
-  // Active Call View
+  // Active Call View (Standard Audio/Video)
   const isVideo = activeCall?.type === CallType.VIDEO;
 
   return (
@@ -109,7 +113,7 @@ const ActiveCallModal: React.FC = () => {
              <div className="absolute inset-0 flex flex-col items-center justify-center space-y-8 bg-gradient-to-b from-dark to-secondary/20">
                 <div className="w-40 h-40 rounded-full bg-gray-800 border-4 border-primary/40 flex items-center justify-center overflow-hidden shadow-[0_0_50px_rgba(59,130,246,0.15)]">
                     {activeCall?.callerPhoto ? (
-                        <img src={activeCall.callerPhoto} className="w-full h-full object-cover" />
+                        <img src={activeCall.callerPhoto} className="w-full h-full object-cover" alt="" />
                     ) : (
                         <div className="w-full h-full bg-gradient-to-tr from-primary/10 to-accent/10"></div>
                     )}
@@ -120,11 +124,9 @@ const ActiveCallModal: React.FC = () => {
                         {callStatus === CallStatus.CONNECTED ? formatTime(callTime) : "ESTABLISHING LINK..."}
                     </p>
                 </div>
-                <audio ref={remoteVideoRef as any} autoPlay /> 
              </div>
         )}
 
-        {/* Top Header Info for Video */}
         {isVideo && (
             <div className="absolute top-10 left-4 z-10 flex flex-col">
                 <span className="text-white font-black text-lg drop-shadow-md">{activeCall?.calleeName || activeCall?.callerName}</span>
@@ -133,7 +135,6 @@ const ActiveCallModal: React.FC = () => {
         )}
       </div>
 
-      {/* Control Bar */}
       <div className="h-32 bg-secondary/80 backdrop-blur-md flex items-center justify-around px-10 pb-6 rounded-t-[3rem] border-t border-white/5">
          <button 
             onClick={() => setMicEnabled(!micEnabled)}

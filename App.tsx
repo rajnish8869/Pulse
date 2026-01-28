@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+
+import React, { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { CallProvider } from './context/CallContext';
+import { CallProvider, useCall } from './context/CallContext';
 import Login from './pages/Login';
 import BottomNav from './components/BottomNav';
 import CallHistory from './pages/CallHistory';
@@ -9,12 +10,24 @@ import Contacts from './pages/Contacts';
 import ActiveCallModal from './components/ActiveCallModal';
 import { User, LogOut } from 'lucide-react';
 
+const GlobalAudioSink: React.FC = () => {
+  const { remoteAudioRef } = useCall();
+  return (
+    <audio 
+      ref={remoteAudioRef} 
+      autoPlay 
+      playsInline 
+      className="hidden" 
+      aria-hidden="true"
+    />
+  );
+};
+
 const AppContent: React.FC = () => {
   const { user, loading, signOut } = useAuth();
   const [page, setPage] = useState('ptt'); // Default to PTT for Ten Ten feel
 
   useEffect(() => {
-      // Simple Back Button handling for web history
       const handleBack = (e: PopStateEvent) => {
           if (page !== 'ptt') {
               setPage('ptt');
@@ -65,6 +78,7 @@ const AppContent: React.FC = () => {
     <div className="bg-dark h-screen text-white font-sans overflow-hidden">
       <CallProvider>
         <div className="w-full h-full relative">
+          <GlobalAudioSink />
           {renderPage()}
           <BottomNav currentPage={page} onNavigate={setPage} />
           <ActiveCallModal />
