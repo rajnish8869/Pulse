@@ -8,17 +8,13 @@ service cloud.firestore {
       return request.auth != null;
     }
     
-    function isOwner(userId) {
-      return isSignedIn() && request.auth.uid == userId;
-    }
-
-    // Users: 
+    // Users
     match /users/{userId} {
       allow read: if isSignedIn();
-      allow write: if isOwner(userId);
+      allow write: if isSignedIn() && request.auth.uid == userId;
     }
 
-    // Friend Requests:
+    // Friend Requests
     match /friendRequests/{requestId} {
       allow create: if isSignedIn() && request.resource.data.fromUid == request.auth.uid;
       allow read: if isSignedIn() && (
@@ -31,7 +27,7 @@ service cloud.firestore {
       );
     }
 
-    // Confirmed Friendships:
+    // Friendships
     match /friendships/{friendshipId} {
       allow read: if isSignedIn() && (
         resource.data.userA == request.auth.uid || 
@@ -47,31 +43,22 @@ service cloud.firestore {
       );
     }
 
-    // Calls:
+    // Calls - Simplified for Single Doc Signaling
     match /calls/{callId} {
+      // Allow creation if you are the caller
       allow create: if isSignedIn() && request.resource.data.callerId == request.auth.uid;
+      
+      // Allow read/update if you are the caller OR the callee
       allow read, update: if isSignedIn() && (
         resource.data.callerId == request.auth.uid || 
         resource.data.calleeId == request.auth.uid
       );
-
-      // WebRTC Signaling Sub-collections
-      // FIX: Allow create if signed in to avoid race condition with parent doc creation.
-      // We strictly enforce READ access, but allow write access for signaling speed.
-      match /offerCandidates/{candidateId} {
-        allow create: if isSignedIn();
-        allow read: if isSignedIn() && (
-          get(/databases/$(database)/documents/calls/$(callId)).data.callerId == request.auth.uid ||
-          get(/databases/$(database)/documents/calls/$(callId)).data.calleeId == request.auth.uid
-        );
-      }
-      match /answerCandidates/{candidateId} {
-        allow create: if isSignedIn();
-        allow read: if isSignedIn() && (
-          get(/databases/$(database)/documents/calls/$(callId)).data.callerId == request.auth.uid ||
-          get(/databases/$(database)/documents/calls/$(callId)).data.calleeId == request.auth.uid
-        );
-      }
+      
+      // Allow delete (cleanup)
+      allow delete: if isSignedIn() && (
+        resource.data.callerId == request.auth.uid || 
+        resource.data.calleeId == request.auth.uid
+      );
     }
   }
 }

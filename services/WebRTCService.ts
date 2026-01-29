@@ -1,13 +1,13 @@
 
 import { db } from "./firebase";
 import {
-  collection,
-  addDoc,
-  onSnapshot,
   doc,
   setDoc,
   getDoc,
   updateDoc,
+  onSnapshot,
+  arrayUnion,
+  collection
 } from "firebase/firestore";
 
 const servers = {
@@ -29,6 +29,8 @@ export class WebRTCService {
   peerConnection: RTCPeerConnection | null = null;
   localStream: MediaStream | null = null;
   remoteStream: MediaStream | null = null;
+  unsubscribes: (() => void)[] = [];
+  processedCandidateszb: Set<string> = new Set();
 
   constructor() {}
 
@@ -40,7 +42,7 @@ export class WebRTCService {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: false,
-        audio: { echoCancellation: true, noiseSuppression: true },
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
       this.localStream = stream;
       return stream;
@@ -67,6 +69,11 @@ export class WebRTCService {
       onTrack(this.remoteStream!);
     };
 
+    // Log connection state changes for debugging
+    this.peerConnection.onconnectionstatechange = () => {
+      console.log("WebRTC Connection State:", this.peerConnection?.connectionState);
+    };
+
     return this.peerConnection;
   }
 
@@ -78,19 +85,17 @@ export class WebRTCService {
     if (!this.peerConnection) throw new Error("PeerConnection not initialized");
 
     const callDocRef = doc(collection(db, "calls"));
-    const offerCandidatesCol = collection(callDocRef, "offerCandidates");
-
-    // Queue for ICE candidates to ensure they are written AFTER the parent document exists
-    let callDocCreated = false;
     const candidateQueue: RTCIceCandidate[] = [];
+    let docCreated = false;
 
-    this.peerConnection.onicecandidate = (event) => {
+    // Handle ICE Candidates - Write to 'offerCandidates' array
+    this.peerConnection.onicecandidate = async (event) => {
       if (event.candidate) {
-        if (callDocCreated) {
-          addDoc(offerCandidatesCol, {
-            candidate: event.candidate.toJSON(),
-            type: "caller",
-          }).catch(e => console.error("Error adding offer candidate:", e));
+        const json = event.candidate.toJSON();
+        if (docCreated) {
+          await updateDoc(callDocRef, {
+            offerCandidates: arrayUnion(json)
+          }).catch(e => console.error("Error sending offer candidate:", e));
         } else {
           candidateQueue.push(event.candidate);
         }
@@ -109,47 +114,49 @@ export class WebRTCService {
         type: offerDescription.type,
         sdp: offerDescription.sdp,
       },
+      offerCandidates: [], // Initialize arrays
+      answerCandidates: [],
       status: "offering",
       timestamp: Date.now(),
       ...metadata,
     };
 
     await setDoc(callDocRef, callData);
-    
-    // Parent document created, flush the queue
-    callDocCreated = true;
-    candidateQueue.forEach((candidate) => {
-      addDoc(offerCandidatesCol, {
-        candidate: candidate.toJSON(),
-        type: "caller",
-      }).catch(e => console.error("Error adding queued offer candidate:", e));
-    });
+    docCreated = true;
 
-    onSnapshot(callDocRef, (snapshot) => {
+    // Flush queued candidates
+    if (candidateQueue.length > 0) {
+      const jsonCandidates = candidateQueue.map(c => c.toJSON());
+      await updateDoc(callDocRef, {
+        offerCandidates: arrayUnion(...jsonCandidates)
+      });
+    }
+
+    // Listen for Answer and Answer Candidates
+    const unsub = onSnapshot(callDocRef, (snapshot) => {
       const data = snapshot.data();
-      if (
-        !this.peerConnection?.currentRemoteDescription &&
-        data?.answer &&
-        this.peerConnection
-      ) {
+      if (!this.peerConnection || !data) return;
+
+      // Handle Answer SDP
+      if (!this.peerConnection.currentRemoteDescription && data.answer) {
         const answerDescription = new RTCSessionDescription(data.answer);
         this.peerConnection.setRemoteDescription(answerDescription);
       }
-    });
 
-    const answerCandidatesCol = collection(callDocRef, "answerCandidates");
-    onSnapshot(answerCandidatesCol, (snapshot) => {
-      snapshot.docChanges().forEach((change) => {
-        if (change.type === "added") {
-          const data = change.doc.data();
-          if (this.peerConnection) {
-            const candidate = new RTCIceCandidate(data.candidate);
-            this.peerConnection.addIceCandidate(candidate);
+      // Handle Answer Candidates
+      if (data.answerCandidates && Array.isArray(data.answerCandidates)) {
+        data.answerCandidates.forEach((candidate: any) => {
+          const candStr = JSON.stringify(candidate);
+          if (!this.processedCandidateszb.has(candStr)) {
+            this.processedCandidateszb.add(candStr);
+            this.peerConnection?.addIceCandidate(new RTCIceCandidate(candidate))
+              .catch(e => console.error("Error adding answer candidate", e));
           }
-        }
-      });
+        });
+      }
     });
 
+    this.unsubscribes.push(unsub);
     return callDocRef.id;
   }
 
@@ -157,24 +164,27 @@ export class WebRTCService {
     if (!this.peerConnection) throw new Error("PeerConnection not initialized");
 
     const callDocRef = doc(db, "calls", callId);
-    const answerCandidatesCol = collection(callDocRef, "answerCandidates");
     const callSnap = await getDoc(callDocRef);
     const callData = callSnap.data();
 
-    this.peerConnection.onicecandidate = (event) => {
+    if (!callData) throw new Error("Call not found");
+
+    // Handle ICE Candidates - Write to 'answerCandidates' array
+    this.peerConnection.onicecandidate = async (event) => {
       if (event.candidate) {
-        addDoc(answerCandidatesCol, {
-          candidate: event.candidate.toJSON(),
-          type: "answer",
-        }).catch(e => console.error("Error adding answer candidate:", e));
+        await updateDoc(callDocRef, {
+          answerCandidates: arrayUnion(event.candidate.toJSON())
+        }).catch(e => console.error("Error sending answer candidate:", e));
       }
     };
 
-    const offerDescription = callData?.offer;
+    // Set Remote Description (Offer)
+    const offerDescription = callData.offer;
     await this.peerConnection.setRemoteDescription(
       new RTCSessionDescription(offerDescription),
     );
 
+    // Create Answer
     const answerDescription = await this.peerConnection.createAnswer();
     await this.peerConnection.setLocalDescription(answerDescription);
 
@@ -185,34 +195,53 @@ export class WebRTCService {
 
     await updateDoc(callDocRef, { answer, status: "connected" });
 
-    const offerCandidatesCol = collection(callDocRef, "offerCandidates");
-    onSnapshot(offerCandidatesCol, (snapshot) => {
-      snapshot.docChanges().forEach((change) => {
-        if (change.type === "added") {
-          const data = change.doc.data();
-          if (this.peerConnection) {
-            const candidate = new RTCIceCandidate(data.candidate);
-            this.peerConnection.addIceCandidate(candidate);
+    // Process existing offer candidates immediately
+    if (callData.offerCandidates && Array.isArray(callData.offerCandidates)) {
+        callData.offerCandidates.forEach((candidate: any) => {
+            const candStr = JSON.stringify(candidate);
+            if (!this.processedCandidateszb.has(candStr)) {
+              this.processedCandidateszb.add(candStr);
+              this.peerConnection?.addIceCandidate(new RTCIceCandidate(candidate))
+                .catch(e => console.error("Error adding initial offer candidate", e));
+            }
+        });
+    }
+
+    // Listen for new Offer Candidates
+    const unsub = onSnapshot(callDocRef, (snapshot) => {
+      const data = snapshot.data();
+      if (!this.peerConnection || !data) return;
+
+      if (data.offerCandidates && Array.isArray(data.offerCandidates)) {
+        data.offerCandidates.forEach((candidate: any) => {
+          const candStr = JSON.stringify(candidate);
+          if (!this.processedCandidateszb.has(candStr)) {
+            this.processedCandidateszb.add(candStr);
+            this.peerConnection?.addIceCandidate(new RTCIceCandidate(candidate))
+              .catch(e => console.error("Error adding offer candidate", e));
           }
-        }
-      });
+        });
+      }
     });
+
+    this.unsubscribes.push(unsub);
   }
 
   async cleanup(callId: string | null) {
+    // Unsubscribe from all Firestore listeners to prevent memory leaks and ghost updates
+    this.unsubscribes.forEach(unsub => unsub());
+    this.unsubscribes = [];
+    this.processedCandidateszb.clear();
+
     if (this.peerConnection) {
-      this.peerConnection.getReceivers().forEach((receiver) => {
-        if (receiver.track) {
-          receiver.track.stop();
-          receiver.track.enabled = false;
-        }
-      });
+      this.peerConnection.ontrack = null;
+      this.peerConnection.onicecandidate = null;
       this.peerConnection.close();
       this.peerConnection = null;
     }
+    
     if (this.localStream) {
       this.localStream.getTracks().forEach((track) => {
-        track.enabled = false;
         track.stop();
       });
       this.localStream = null;
@@ -225,16 +254,16 @@ export class WebRTCService {
         const snap = await getDoc(callRef);
         if (snap.exists()) {
           const data = snap.data();
+          // Only end if not already ended/rejected to avoid overwriting final state
           if (data.status !== "ended" && data.status !== "rejected") {
-            const endedAt = Date.now();
             await updateDoc(callRef, {
               status: "ended",
-              endedAt,
+              endedAt: Date.now(),
             });
           }
         }
       } catch (e) {
-        // ignore
+        // ignore errors during cleanup
       }
     }
   }
