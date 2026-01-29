@@ -35,15 +35,18 @@ service cloud.firestore {
 
     // Friendships: Established connections
     match /friendships/{friendshipId} {
+      // Allow read if you are one of the participants
       allow read: if isSignedIn() && (
         resource.data.userA == request.auth.uid || 
         resource.data.userB == request.auth.uid
       );
-      // Friendships are usually created by server or transaction, but client creation is allowed here for simplicity
+      
+      // Allow creation by authenticated users (logic verified by composite ID usually)
       allow create: if isSignedIn() && (
         request.resource.data.userA == request.auth.uid || 
         request.resource.data.userB == request.auth.uid
       );
+      
       allow delete: if isSignedIn() && (
         resource.data.userA == request.auth.uid || 
         resource.data.userB == request.auth.uid
@@ -51,7 +54,6 @@ service cloud.firestore {
     }
 
     // Call History: Archived logs of completed calls
-    // Note: Active signaling happens in Realtime Database, this is just for the record
     match /calls/{callId} {
       allow create: if isSignedIn() && (
         request.resource.data.callerId == request.auth.uid || 
@@ -63,7 +65,6 @@ service cloud.firestore {
         resource.data.calleeId == request.auth.uid
       );
       
-      // History logs are immutable
       allow update, delete: if false; 
     }
   }

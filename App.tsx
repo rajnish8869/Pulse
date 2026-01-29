@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { useCall, CallProvider } from "./context/CallContext";
@@ -5,7 +6,7 @@ import Login from "./pages/Login";
 import BottomNav from "./components/BottomNav";
 import WalkieTalkie from "./pages/WalkieTalkie";
 import { User, LogOut, Copy, UserPlus, Check, X, Mail, ShieldCheck, Zap, Radio, Bell, AlertTriangle, Camera } from "lucide-react";
-import { collection, query, where, getDocs, addDoc, onSnapshot, doc, updateDoc, deleteDoc, setDoc } from "firebase/firestore";
+import { collection, query, where, getDocs, addDoc, onSnapshot, doc, updateDoc, deleteDoc, setDoc, getDoc } from "firebase/firestore";
 import { ref, onValue, onDisconnect, set, serverTimestamp } from "firebase/database";
 import { db, rtdb } from "./services/firebase";
 import { FriendRequest } from "./types";
@@ -59,6 +60,7 @@ const ProfilePage: React.FC = () => {
     setStatus(null);
 
     try {
+      // 1. Find User
       const uq = query(collection(db, "users"), where("email", "==", addEmail), where("pin", "==", addPin));
       const snap = await getDocs(uq);
       
@@ -71,15 +73,18 @@ const ProfilePage: React.FC = () => {
         throw new Error("You cannot add yourself.");
       }
 
-      // Check if already friends
+      // 2. Check if already friends
+      // FIXED: Use getDoc instead of query. Querying by ID with where() fails security rules 
+      // if the rule checks resource.data but the query doesn't filter on that data.
       const friendshipId1 = [user.uid, target.uid].sort().join("_");
-      const fSnapDocs = await getDocs(query(collection(db, "friendships"), where("__name__", "==", friendshipId1)));
+      const friendshipDocRef = doc(db, "friendships", friendshipId1);
+      const friendshipSnap = await getDoc(friendshipDocRef);
       
-      if (!fSnapDocs.empty) {
+      if (friendshipSnap.exists()) {
         throw new Error("Already connected.");
       }
       
-      // Simpler check for existing requests
+      // 3. Check for existing request
       const existingReq = await getDocs(query(
         collection(db, "friendRequests"), 
         where("fromUid", "==", user.uid), 
@@ -91,6 +96,7 @@ const ProfilePage: React.FC = () => {
          throw new Error("Request already sent.");
       }
 
+      // 4. Send Request
       await addDoc(collection(db, "friendRequests"), {
         fromUid: user.uid,
         fromName: user.displayName,
@@ -104,6 +110,7 @@ const ProfilePage: React.FC = () => {
       setAddEmail("");
       setAddPin("");
     } catch (err: any) {
+      console.error(err);
       setStatus({ msg: err.message, type: "error" });
     } finally {
       setLoading(false);

@@ -4,7 +4,7 @@
     "calls": {
       ".read": "auth != null",
       ".write": "auth != null",
-      ".indexOn": ["calleeId"]
+      ".indexOn": ["calleeId", "status"]
     },
     "status": {
       ".read": "auth != null",
