@@ -159,7 +159,7 @@ export class WebRTCService {
       },
       offerCandidates: [], 
       answerCandidates: [],
-      status: "offering",
+      status: "OFFERING", // FIXED: Uppercase to match CallStatus.OFFERING
       timestamp: Date.now(),
       ...metadata,
     };
@@ -264,7 +264,7 @@ export class WebRTCService {
       sdp: answerDescription.sdp,
     };
 
-    await updateDoc(callDocRef, { answer, status: "connected" });
+    await updateDoc(callDocRef, { answer, status: "CONNECTED" }); // FIXED: Uppercase to match CallStatus.CONNECTED
     console.log("PulseRTC: Sent Answer");
 
     // 4. Process Existing Offer Candidates
@@ -346,9 +346,9 @@ export class WebRTCService {
         if (snap.exists()) {
           const data = snap.data();
           // Only end if not already ended/rejected
-          if (data.status !== "ended" && data.status !== "rejected") {
+          if (data.status !== "ENDED" && data.status !== "REJECTED") { // FIXED: Uppercase
             await updateDoc(callRef, {
-              status: "ended",
+              status: "ENDED", // FIXED: Uppercase
               endedAt: Date.now(),
             });
             console.log("PulseRTC: Call marked as ended in DB");
