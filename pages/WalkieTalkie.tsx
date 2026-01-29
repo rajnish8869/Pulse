@@ -6,9 +6,10 @@ import {
   Radio,
   User as UserIcon,
   AlertTriangle,
+  UserPlus,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
-import { collection, query, limit, getDocs } from "firebase/firestore";
+import { collection, query, where, onSnapshot, doc, getDoc } from "firebase/firestore";
 import { db } from "../services/firebase";
 import { DEFAULT_AVATAR } from "../constants";
 
@@ -26,27 +27,68 @@ const WalkieTalkie: React.FC = () => {
   const { user } = useAuth();
 
   const [selectedFriend, setSelectedFriend] = useState<UserProfile | null>(null);
-  const [users, setUsers] = useState<UserProfile[]>([]);
+  const [friends, setFriends] = useState<UserProfile[]>([]);
   const [isHoldingButton, setIsHoldingButton] = useState(false);
   const [isReady, setIsReady] = useState(false);
   const [permissionDenied, setPermissionDenied] = useState(false);
+  const [loadingFriends, setLoadingFriends] = useState(true);
+  
   const initializingRef = useRef(false);
 
   useEffect(() => {
     if (!db || !user) return;
-    const fetchUsers = async () => {
-      const q = query(collection(db, "users"), limit(20));
-      const snap = await getDocs(q);
-      const list: UserProfile[] = [];
-      snap.forEach((d) => {
-        const u = d.data() as UserProfile;
-        if (u.uid !== user?.uid) list.push(u);
+
+    // Listen to confirmed friendships where current user is userA or userB
+    const q1 = query(collection(db, "friendships"), where("userA", "==", user.uid));
+    const q2 = query(collection(db, "friendships"), where("userB", "==", user.uid));
+
+    const handleFriendSnaps = async (snapshot: any) => {
+      const friendIds = snapshot.docs.map((d: any) => {
+        const data = d.data();
+        return data.userA === user.uid ? data.userB : data.userA;
       });
-      setUsers(list);
-      if (list.length > 0 && !selectedFriend) setSelectedFriend(list[0]);
+
+      const friendProfiles: UserProfile[] = [];
+      for (const fid of friendIds) {
+        const snap = await getDoc(doc(db, "users", fid));
+        if (snap.exists()) {
+          friendProfiles.push(snap.data() as UserProfile);
+        }
+      }
+      return friendProfiles;
     };
-    fetchUsers();
-  }, [user]);
+
+    let unsub1 = onSnapshot(q1, async (snap1) => {
+       const profilesA = await handleFriendSnaps(snap1);
+       setFriends(prev => {
+         const combined = [...prev, ...profilesA];
+         const unique = combined.filter((v, i, a) => a.findIndex(t => t.uid === v.uid) === i);
+         return unique;
+       });
+       setLoadingFriends(false);
+    });
+
+    let unsub2 = onSnapshot(q2, async (snap2) => {
+       const profilesB = await handleFriendSnaps(snap2);
+       setFriends(prev => {
+         const combined = [...prev, ...profilesB];
+         const unique = combined.filter((v, i, a) => a.findIndex(t => t.uid === v.uid) === i);
+         return unique;
+       });
+       setLoadingFriends(false);
+    });
+
+    return () => {
+      unsub1();
+      unsub2();
+    };
+  }, [user?.uid]);
+
+  useEffect(() => {
+    if (friends.length > 0 && !selectedFriend) {
+      setSelectedFriend(friends[0]);
+    }
+  }, [friends]);
 
   useEffect(() => {
     if (!selectedFriend || !user || !isReady || initializingRef.current) return;
@@ -70,7 +112,7 @@ const WalkieTalkie: React.FC = () => {
       }, 1000);
       return () => clearTimeout(timer);
     }
-  }, [selectedFriend, isReady, activeCall?.callId, callStatus, incomingCall?.callId]);
+  }, [selectedFriend?.uid, isReady, activeCall?.callId, callStatus, incomingCall?.callId]);
 
   useEffect(() => {
     if (incomingCall && callStatus === CallStatus.RINGING) {
@@ -82,7 +124,7 @@ const WalkieTalkie: React.FC = () => {
   const isConnecting = callStatus === CallStatus.OFFERING || callStatus === CallStatus.RINGING;
   const isRemoteTalking = activeCall?.activeSpeakerId && activeCall.activeSpeakerId !== user?.uid;
 
-  const activeFriend = users.find((u) => {
+  const activeFriend = friends.find((u) => {
     if (!activeCall) return false;
     const otherId = activeCall.callerId === user?.uid ? activeCall.calleeId : activeCall.callerId;
     return u.uid === otherId;
@@ -140,11 +182,25 @@ const WalkieTalkie: React.FC = () => {
     );
   }
 
+  if (!loadingFriends && friends.length === 0) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center p-8 bg-dark text-center">
+        <div className="w-24 h-24 bg-gray-800 rounded-full flex items-center justify-center mb-6">
+          <UserPlus size={40} className="text-gray-500" />
+        </div>
+        <h3 className="text-xl font-bold mb-2 uppercase italic tracking-tighter">Quiet Airwaves</h3>
+        <p className="text-gray-500 text-sm max-w-xs mb-8">
+          You haven't added any friends yet. Go to the Profile tab to add friends using their Email and PIN.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="h-full flex flex-col bg-dark overflow-hidden safe-area-top safe-area-bottom">
       <div className="pt-6 pb-4 px-4 bg-secondary/10 border-b border-white/5">
         <div className="flex overflow-x-auto space-x-6 pb-2 scrollbar-hide snap-x">
-          {users.map((friend) => {
+          {friends.map((friend) => {
             const isSelected = selectedFriend?.uid === friend.uid;
             return (
               <button

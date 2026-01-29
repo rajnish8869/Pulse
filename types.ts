@@ -1,6 +1,6 @@
 
 export enum CallType {
-  PTT = 'PTT' // Pure walkie-talkie mode
+  PTT = 'PTT'
 }
 
 export enum CallStatus {
@@ -18,7 +18,17 @@ export interface UserProfile {
   email: string | null;
   photoURL: string | null;
   lastActive: number;
-  fcmToken?: string;
+  pin: string; // 6-digit PIN for friend requests
+}
+
+export interface FriendRequest {
+  id: string;
+  fromUid: string;
+  fromName: string;
+  fromPhoto: string | null;
+  toUid: string;
+  status: 'pending' | 'accepted' | 'declined';
+  timestamp: number;
 }
 
 export interface CallSession {
@@ -34,10 +44,4 @@ export interface CallSession {
   endedAt?: number | null;
   duration?: number | null;
   activeSpeakerId?: string | null;
-}
-
-export interface WebRTCSignal {
-  type: 'offer' | 'answer' | 'candidate';
-  payload: any;
-  timestamp: number;
 }
