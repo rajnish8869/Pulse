@@ -90,7 +90,8 @@ const WalkieTalkie: React.FC = () => {
        const now = Date.now();
        const statusMap: Record<string, boolean> = {};
        profiles.forEach(p => {
-          statusMap[p.uid] = p.lastActive && (now - p.lastActive < 120000); // 2 mins threshold
+          // Fix TS error: ensure explicit boolean result
+          statusMap[p.uid] = !!p.lastActive && (now - p.lastActive < 120000); // 2 mins threshold
        });
        setOnlineStatus(statusMap);
     };
@@ -142,7 +143,7 @@ const WalkieTalkie: React.FC = () => {
        makeCall(selectedFriend.uid, selectedFriend.displayName)
           .catch(() => setConnectionError(true));
     }
-  }, [selectedFriend, isReady, activeCall, callStatus, incomingCall,ZF=>connectionError]);
+  }, [selectedFriend, isReady, activeCall, callStatus, incomingCall, connectionError]);
 
   // 4. Auto-Answer
   useEffect(() => {
