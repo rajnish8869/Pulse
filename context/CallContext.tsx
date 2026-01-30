@@ -224,9 +224,10 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     ensureAudioContext();
 
     try {
-      // Ensure media is ready
-      await rtcRef.current.acquireMedia();
-      
+      // Ensure media is ready and MUTED for PTT
+      const stream = await rtcRef.current.acquireMedia();
+      stream.getAudioTracks().forEach(t => t.enabled = false);
+
       // Setup PeerConnection with fresh event handlers
       rtcRef.current.createPeerConnection((remoteStream) => {
         setRemoteStream(remoteStream);
@@ -273,7 +274,9 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     ensureAudioContext();
 
     try {
-      await rtcRef.current.acquireMedia();
+      // Ensure media is ready and MUTED for PTT
+      const stream = await rtcRef.current.acquireMedia();
+      stream.getAudioTracks().forEach(t => t.enabled = false);
 
       rtcRef.current.createPeerConnection((remoteStream) => {
         setRemoteStream(remoteStream);

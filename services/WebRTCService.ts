@@ -55,8 +55,8 @@ export class WebRTCService {
 
   async acquireMedia(): Promise<MediaStream> {
     if (this.localStream) {
-      // Ensure tracks are enabled
-      this.localStream.getTracks().forEach(t => t.enabled = true);
+      // PTT: Do not auto-enable tracks here. 
+      // Control is handed over to CallContext to manage Mute/Unmute state.
       return this.localStream;
     }
 
