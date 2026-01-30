@@ -3,11 +3,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { useCall } from "../context/CallContext";
 import { CallStatus, UserProfile } from "../types";
 import {
-  Radio,
-  User as UserIcon,
-  AlertTriangle,
   UserPlus,
-  RefreshCw,
   Mic,
   Volume2,
   Signal,
@@ -36,21 +32,19 @@ const WalkieTalkie: React.FC = () => {
   const [selectedFriend, setSelectedFriend] = useState<UserProfile | null>(null);
   const [friends, setFriends] = useState<UserProfile[]>([]);
   const [isHoldingButton, setIsHoldingButton] = useState(false);
-  const [permissionDenied, setPermissionDenied] = useState(false);
   const [loadingFriends, setLoadingFriends] = useState(true);
   
-  // New state to break infinite loops
+  // Connection Error State (UI)
   const [connectionError, setConnectionError] = useState(false);
   
-  const [onlineStatus, setOnlineStatus] = useState<Record<string, boolean>>({});
-  
-  // Track the target friend to ensure we don't start call for old selection
+  // Refs for logic (Synchronous tracking to prevent loop races)
+  const connectionErrorRef = useRef(false);
   const targetFriendIdRef = useRef<string | null>(null);
-
-  // Track previous status to detect call failures (OFFERING -> ENDED)
   const prevStatusRef = useRef<CallStatus>(CallStatus.ENDED);
-  // Track if we are intentionally switching channels to ignore expected disconnects
   const isSwitchingRef = useRef(false);
+  const attemptTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const [onlineStatus, setOnlineStatus] = useState<Record<string, boolean>>({});
 
   // 1. Fetch Friends & Status
   useEffect(() => {
@@ -109,82 +103,111 @@ const WalkieTalkie: React.FC = () => {
   // 2. Default selection
   useEffect(() => {
     if (friends.length > 0 && !selectedFriend) {
-      setSelectedFriend(friends[0]);
-      targetFriendIdRef.current = friends[0].uid;
+      handleFriendSelect(friends[0]);
     }
   }, [friends]);
 
-  // 3. Main Switcher Logic
+  // 3. Centralized Connection Logic
   useEffect(() => {
     if (!selectedFriend || !user || !isMediaReady) return;
-
-    // Handle incoming calls implicitly via auto-answer if needed (handled in other effect)
-    if (incomingCall) return;
+    if (incomingCall) return; // Prioritize incoming
 
     const currentActiveId = activeCall ? (activeCall.callerId === user.uid ? activeCall.calleeId : activeCall.callerId) : null;
     const desiredId = selectedFriend.uid;
 
-    if (currentActiveId === desiredId) {
-        // Already connected to the right person. If we were in error state, clear it once connected.
-        if (connectionError && callStatus === CallStatus.CONNECTED) {
+    // A. Detect Failure (Transition from Connecting -> Ended)
+    const wasConnecting = prevStatusRef.current === CallStatus.OFFERING || 
+                          prevStatusRef.current === CallStatus.RINGING || 
+                          prevStatusRef.current === CallStatus.CONNECTING;
+    const isEnded = callStatus === CallStatus.ENDED || callStatus === CallStatus.REJECTED;
+
+    if (wasConnecting && isEnded) {
+        if (isSwitchingRef.current) {
+            // We expected this disconnect because we are switching channels
+            isSwitchingRef.current = false;
+        } else {
+            // Unexpected disconnect (Timeout, Error, Rejection)
+            console.log("Pulse: Connection failed/dropped. Halting auto-retry.");
+            connectionErrorRef.current = true;
+            setConnectionError(true);
+        }
+    }
+    prevStatusRef.current = callStatus;
+
+    // B. Connection Logic
+    // If we are already connected to the right person, clear errors
+    if (currentActiveId === desiredId && callStatus === CallStatus.CONNECTED) {
+        if (connectionErrorRef.current) {
+            connectionErrorRef.current = false;
             setConnectionError(false);
         }
         return;
     }
 
-    // If we are connected to someone else, end it
+    // If connected to WRONG person, end it.
     if (activeCall && currentActiveId !== desiredId) {
         console.log("Switching: Ending previous call");
-        isSwitchingRef.current = true; // Mark as intentional switch
+        isSwitchingRef.current = true;
         endCall();
-        return; // Wait for state to become ENDED
+        return; // Wait for ENDED state
     }
 
-    // If no active call and status is ended, start new call
+    // If idle, and we want to connect, and no error blocking
     if (!activeCall && callStatus === CallStatus.ENDED) {
-        // Check connectionError to prevent infinite loops
-        if (targetFriendIdRef.current === desiredId && !connectionError) {
-            console.log("Switching: Starting new call to", desiredId);
-            makeCall(desiredId, selectedFriend.displayName)
-                .catch((e) => {
-                    console.error("Connection failed", e);
-                    setConnectionError(true);
-                });
+        if (targetFriendIdRef.current === desiredId && !connectionErrorRef.current) {
+            // Debounce the makeCall slightly to allow state to settle
+            if (attemptTimeoutRef.current) clearTimeout(attemptTimeoutRef.current);
+            
+            attemptTimeoutRef.current = setTimeout(() => {
+                console.log("Switching: Starting new call to", desiredId);
+                makeCall(desiredId, selectedFriend.displayName)
+                    .catch((e) => {
+                        console.error("Connection failed", e);
+                        connectionErrorRef.current = true;
+                        setConnectionError(true);
+                    });
+            }, 500);
         }
     }
-  }, [selectedFriend, isMediaReady, activeCall, callStatus, incomingCall, connectionError]);
+    
+    return () => {
+        if (attemptTimeoutRef.current) clearTimeout(attemptTimeoutRef.current);
+    };
 
-  // 4. Error Detector: Prevent Infinite Loops
-  useEffect(() => {
-     // Check if we were previously trying to connect
-     const wasConnecting = prevStatusRef.current === CallStatus.OFFERING || 
-                           prevStatusRef.current === CallStatus.RINGING || 
-                           prevStatusRef.current === CallStatus.CONNECTING;
-     
-     const isEnded = callStatus === CallStatus.ENDED || callStatus === CallStatus.REJECTED;
-
-     if (wasConnecting && isEnded) {
-         if (isSwitchingRef.current) {
-             // We intentionally ended the call to switch channels. This is normal.
-             isSwitchingRef.current = false;
-         } else {
-             // The call ended without us initiating a switch (Timeout, Reject, Error).
-             // Set error state to halt the auto-retry loop.
-             console.log("Pulse: Call connection failed (Timeout/Rejected). Halting retry loop.");
-             setConnectionError(true);
-         }
-     }
-     prevStatusRef.current = callStatus;
-  }, [callStatus]);
+  }, [selectedFriend, isMediaReady, activeCall, callStatus, incomingCall, user]);
 
   // Handle manual selection change
   const handleFriendSelect = (friend: UserProfile) => {
-      if (selectedFriend?.uid === friend.uid) return;
+      if (selectedFriend?.uid === friend.uid && !connectionError) return;
       
+      console.log("Pulse: Selected channel", friend.displayName);
+      
+      // Reset Error State
+      connectionErrorRef.current = false;
       setConnectionError(false);
-      isSwitchingRef.current = false; // Reset switch flag
+      
+      // Reset Switching State
+      isSwitchingRef.current = false;
+      
       setSelectedFriend(friend);
       targetFriendIdRef.current = friend.uid;
+      
+      // If idle, the effect will pick this up and connect.
+      // If connected to someone else, effect will tear down and connect.
+      // If in error state (retry), resetting error ref triggers effect.
+  };
+
+  const handleManualRetry = () => {
+      console.log("Pulse: Manual Retry");
+      connectionErrorRef.current = false;
+      setConnectionError(false);
+      // This will trigger the effect to try connecting again
+      if (selectedFriend) {
+          // Force a re-eval if dependencies didn't change enough
+          const current = selectedFriend;
+          setSelectedFriend(null);
+          setTimeout(() => setSelectedFriend(current), 10);
+      }
   };
 
   // 5. Auto-Answer
@@ -192,9 +215,8 @@ const WalkieTalkie: React.FC = () => {
     if (incomingCall && callStatus === CallStatus.RINGING) answerCall();
   }, [incomingCall, callStatus]);
 
-  const handleManualRetry = () => {
-    setConnectionError(false);
-  };
+
+  // --- UI ---
 
   const isConnected = callStatus === CallStatus.CONNECTED;
   const isConnecting = callStatus === CallStatus.OFFERING || 
@@ -207,6 +229,7 @@ const WalkieTalkie: React.FC = () => {
   let ringColor = "border-slate-800";
   let glowColor = "shadow-none";
   let statusText = "Ready";
+  let showRetry = false;
   
   if (isHoldingButton) {
      stateColor = "text-rose-500";
@@ -225,11 +248,15 @@ const WalkieTalkie: React.FC = () => {
   } else if (connectionError) {
      stateColor = "text-red-500";
      ringColor = "border-red-900";
-     statusText = "OFFLINE";
+     statusText = "LINK FAILED";
+     showRetry = true;
   } else if (isConnected) {
      stateColor = "text-primary";
      ringColor = "border-primary/50";
      statusText = "CHANNEL OPEN";
+  } else {
+     // Idle state but trying to connect (gap between effect runs)
+     statusText = "SEARCHING...";
   }
 
   const handleTouchStart = () => {
@@ -245,8 +272,6 @@ const WalkieTalkie: React.FC = () => {
     setIsHoldingButton(false);
     toggleTalk(false);
   };
-
-  // --- RENDERING ---
 
   if (!isMediaReady) {
     return (
@@ -362,9 +387,13 @@ const WalkieTalkie: React.FC = () => {
             <h2 className={`text-2xl font-black italic tracking-tighter uppercase transition-colors duration-200 ${stateColor}`}>
                {statusText}
             </h2>
-            <p className="text-xs font-medium text-slate-500 mt-2 uppercase tracking-[0.2em]">
-               {isHoldingButton ? "Release to Listen" : isRemoteTalking ? selectedFriend?.displayName : isConnected ? "Hold to Broadcast" : connectionError ? <button onClick={handleManualRetry} className="underline text-primary">Retry Link</button> : "Syncing Frequency"}
-            </p>
+            <div className="mt-2 text-xs font-medium text-slate-500 uppercase tracking-[0.2em]">
+               {isHoldingButton ? "Release to Listen" : 
+                isRemoteTalking ? selectedFriend?.displayName : 
+                isConnected ? "Hold to Broadcast" : 
+                showRetry ? <button onClick={handleManualRetry} className="underline text-primary hover:text-white transition-colors">Retry Connection</button> : 
+                "Establishing Link..."}
+            </div>
          </div>
 
       </div>

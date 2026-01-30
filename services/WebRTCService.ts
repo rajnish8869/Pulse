@@ -51,9 +51,6 @@ export class WebRTCService {
   private isRenegotiating = false; // Prevent overlapping renegotiations
   private processingRemoteDescription = false; // Prevent race conditions in signaling
   
-  // Important: Track the exact SDP string we last processed from the DB.
-  // We cannot rely on peerConnection.remoteDescription.sdp because browsers normalize SDPs (whitespace, ordering),
-  // which causes strict string equality checks against the DB value to fail, triggering infinite loops.
   private lastProcessedOfferSdp: string | null = null;
 
   constructor() {
@@ -147,15 +144,13 @@ export class WebRTCService {
       }
     };
 
-    // Add local tracks (Clone keys to not disturb original stream)
+    // Add local tracks
     if (this.localStream) {
       this.localStream.getTracks().forEach((track) => {
         if (this.peerConnection && this.localStream) {
           this.peerConnection.addTrack(track, this.localStream);
         }
       });
-    } else {
-        console.warn("PulseRTC: No local stream available when creating PeerConnection!");
     }
 
     // Handle remote tracks
@@ -173,21 +168,19 @@ export class WebRTCService {
   private async handleConnectionFailure() {
       if (!this.peerConnection || !this.currentCallId) return;
       
-      const state = this.peerConnection.connectionState;
-      console.warn(`PulseRTC: Connection unstable (${state}). Attempting recovery...`);
-      
       // Only the Offerer (Caller) initiates ICE Restart to avoid glare
-      // Also ensure we are stable before trying to restart
       if (this.isOfferer && !this.isRenegotiating && this.peerConnection.signalingState === 'stable') {
           this.isRenegotiating = true;
           try {
               console.log("PulseRTC: Creating ICE Restart Offer");
-              // Use explicit iceRestart
+              // Check PeerConnection existence again before using
+              if (!this.peerConnection) return;
+
               const offer = await this.peerConnection.createOffer({ iceRestart: true });
+              if (!this.peerConnection) return;
               await this.peerConnection.setLocalDescription(offer);
               
               const callRef = ref(rtdb, `calls/${this.currentCallId}`);
-              // Important: Clear 'answer' so the stale answer doesn't trigger invalid state transitions
               await update(callRef, {
                   offer: { type: offer.type, sdp: offer.sdp },
                   answer: null 
@@ -195,7 +188,6 @@ export class WebRTCService {
           } catch (e: any) {
               console.error("PulseRTC: ICE Restart failed", e.message || e);
           } finally {
-              // Add a small delay before allowing another renegotiation to prevent tight loops
               setTimeout(() => {
                   this.isRenegotiating = false;
               }, 2000);
@@ -217,7 +209,6 @@ export class WebRTCService {
               console.warn("PulseRTC: Failed to add candidate", e);
           }
       } else {
-          console.log("PulseRTC: Buffering candidate (RemoteDesc not set)");
           this.candidateQueue.push(candidateInit);
       }
   }
@@ -226,7 +217,6 @@ export class WebRTCService {
     if (!this.peerConnection) return;
     if (this.candidateQueue.length === 0) return;
 
-    console.log(`PulseRTC: Flushing ${this.candidateQueue.length} buffered candidates`);
     for (const candidate of this.candidateQueue) {
       try {
         await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
@@ -254,8 +244,8 @@ export class WebRTCService {
     
     console.log("PulseRTC: Creating call", callId);
 
-    // 1. Listen for ICE candidates locally and push to RTDB
     this.peerConnection.onicecandidate = async (event) => {
+      // SAFEGUARD: Check if call ID matches current session
       if (event.candidate && this.currentCallId === callId) {
         try {
            const candidatesRef = ref(rtdb, `calls/${callId}/offerCandidates`);
@@ -266,11 +256,10 @@ export class WebRTCService {
       }
     };
 
-    // 2. Create Offer
     const offerDescription = await this.peerConnection.createOffer();
+    if (!this.peerConnection) return callId; // Exit if aborted
     await this.peerConnection.setLocalDescription(offerDescription);
 
-    // 3. Write Initial Data to RTDB
     const callData = {
       callId,
       callerId,
@@ -286,8 +275,6 @@ export class WebRTCService {
     };
 
     await set(newCallRef, callData);
-
-    // PHASE 4: Presence & Cleanup - Register onDisconnect
     await onDisconnect(newCallRef).update({ status: 'ENDED' });
 
     // 4. Listen for Answer in RTDB
@@ -296,21 +283,17 @@ export class WebRTCService {
       const data = snapshot.val();
       if (this.currentCallId !== callId || !this.peerConnection || !data) return;
 
-      // Handle Answer (Works for both initial connection and ICE restart)
-      // Added lock processingRemoteDescription to prevent race conditions from double snapshots
       if (data.answer && !this.processingRemoteDescription) {
         const hasLocalOffer = this.peerConnection.signalingState === 'have-local-offer';
         
         if (hasLocalOffer) {
             this.processingRemoteDescription = true;
-            console.log("PulseRTC: Received Answer, setting remote description...");
             const answerDescription = new RTCSessionDescription(data.answer);
             try {
               await this.peerConnection.setRemoteDescription(answerDescription);
               this.remoteDescriptionSet = true;
               await this.processBufferedCandidates();
               
-              // Only update status to CONNECTED if we are in the initial handshake
               if (data.status === 'CONNECTING') {
                   await update(callRef, { status: 'CONNECTED' });
               }
@@ -324,7 +307,7 @@ export class WebRTCService {
     });
     this.rtdbListeners.push({ ref: callRef, callback: answerListener });
 
-    // 5. Listen for Answer Candidates in RTDB
+    // 5. Listen for Answer Candidates
     const answerCandidatesRef = ref(rtdb, `calls/${callId}/answerCandidates`);
     const candidatesListener = onValue(answerCandidatesRef, async (snapshot) => {
       if (this.currentCallId !== callId) return;
@@ -349,7 +332,7 @@ export class WebRTCService {
 
     const callRef = ref(rtdb, `calls/${callId}`);
     
-    // HANDSHAKE STEP 1: Acknowledge with RINGING via Transaction
+    // Acknowledge with RINGING via Transaction
     await runTransaction(callRef, (data) => {
         if (data && data.status === 'OFFERING') {
             data.status = 'RINGING';
@@ -357,6 +340,8 @@ export class WebRTCService {
         }
         return; 
     });
+
+    if (!this.peerConnection || this.currentCallId !== callId) return; // CHECK 1
 
     const snapshot = await get(callRef);
     if (!snapshot.exists()) throw new Error("Call not found");
@@ -366,7 +351,8 @@ export class WebRTCService {
         throw new Error("Call is not in valid state for answering");
     }
 
-    // PHASE 4: Presence & Cleanup - Register onDisconnect
+    if (!this.peerConnection || this.currentCallId !== callId) return; // CHECK 2
+
     await onDisconnect(callRef).update({ status: 'ENDED' });
 
     // 1. Listen for ICE candidates locally
@@ -387,7 +373,6 @@ export class WebRTCService {
         try {
           await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offerDescription));
           this.remoteDescriptionSet = true;
-          // IMPORTANT: Capture the initial offer SDP so we don't think it's a restart later
           this.lastProcessedOfferSdp = offerDescription.sdp;
         } catch (e) {
           console.error("PulseRTC: Failed to set remote description", e);
@@ -397,6 +382,8 @@ export class WebRTCService {
 
     // 3. Create Answer
     const answerDescription = await this.peerConnection.createAnswer();
+    
+    if (!this.peerConnection) return; // CHECK 3
     await this.peerConnection.setLocalDescription(answerDescription);
 
     const answer = {
@@ -404,13 +391,11 @@ export class WebRTCService {
       sdp: answerDescription.sdp,
     };
 
-    // HANDSHAKE STEP 2: Set status to CONNECTING
     await update(callRef, { answer, status: "CONNECTING" });
 
-    // 4. Setup Listeners for Candidates & Negotiation (ICE Restart)
+    // 4. Setup Listeners
     const offerCandidatesRef = ref(rtdb, `calls/${callId}/offerCandidates`);
     
-    // Process existing candidates first
     const candidatesSnap = await get(offerCandidatesRef);
     if (candidatesSnap.exists()) {
         const candidates = candidatesSnap.val();
@@ -419,7 +404,6 @@ export class WebRTCService {
         });
     }
 
-    // Listen for NEW Offer Candidates
     const candListener = onValue(offerCandidatesRef, async (snapshot) => {
       if (this.currentCallId !== callId) return;
       const candidates = snapshot.val();
@@ -431,30 +415,24 @@ export class WebRTCService {
     });
     this.rtdbListeners.push({ ref: offerCandidatesRef, callback: candListener });
 
-    // Listen for Offer Updates (Renegotiation / ICE Restart)
     const offerListener = onValue(callRef, async (snapshot) => {
         const data = snapshot.val();
         if (this.currentCallId !== callId || !this.peerConnection || !data || !data.offer) return;
 
         const newOfferSdp = data.offer.sdp;
 
-        // CRITICAL FIX: Loop Prevention
-        // We compare the new offer SDP against the *last one we processed from the DB*.
-        // We DO NOT compare against peerConnection.remoteDescription.sdp because browsers may normalize/reformat 
-        // the SDP string after setting it, causing strict equality checks to fail even if they are semantically identical.
         if (newOfferSdp && newOfferSdp !== this.lastProcessedOfferSdp && this.peerConnection.signalingState === 'stable') {
             console.log("PulseRTC: Detected new offer (ICE Restart)");
             this.lastProcessedOfferSdp = newOfferSdp;
             
             try {
-                // Ensure we explicitly set type to 'offer' to avoid "createAnswer not called" errors
-                // caused by implicit state issues or malformed objects.
                 const offerDesc = { type: 'offer' as RTCSdpType, sdp: newOfferSdp };
                 await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offerDesc));
                 this.remoteDescriptionSet = true;
                 await this.processBufferedCandidates(); 
 
                 const newAnswer = await this.peerConnection.createAnswer();
+                if (!this.peerConnection) return;
                 await this.peerConnection.setLocalDescription(newAnswer);
 
                 await update(callRef, {
@@ -471,19 +449,16 @@ export class WebRTCService {
   async endCurrentSession(callId: string | null) {
     console.log("PulseRTC: Ending session", callId);
     
-    this.resetConnectionState();
-
+    // Immediately stop tracks to prevent microphone usage
     if (this.localStream) {
-        this.localStream.getAudioTracks().forEach(t => {
-            t.enabled = false;
-        });
+        this.localStream.getAudioTracks().forEach(t => t.enabled = false);
     }
+
+    this.resetConnectionState();
 
     if (callId) {
       try {
         const callRef = ref(rtdb, `calls/${callId}`);
-        
-        // PHASE 4: Clean up onDisconnect so we don't accidentally wipe data if we are archiving
         await onDisconnect(callRef).cancel();
 
         const snap = await get(callRef);
@@ -492,6 +467,7 @@ export class WebRTCService {
           const data = snap.val();
           if (data.status !== "ENDED" && data.status !== "REJECTED") {
               const historyData = { ...data, status: "ENDED", endedAt: Date.now() };
+              // Cleanup huge SDP blobs
               delete historyData.offerCandidates;
               delete historyData.answerCandidates;
               
