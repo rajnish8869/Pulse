@@ -122,7 +122,7 @@ const WalkieTalkie: React.FC = () => {
     const desiredId = selectedFriend.uid;
 
     if (currentActiveId === desiredId) {
-        // Already connected to the right person
+        // Already connected to the right person. If we were in error state, clear it once connected.
         if (connectionError && callStatus === CallStatus.CONNECTED) {
             setConnectionError(false);
         }
@@ -193,13 +193,8 @@ const WalkieTalkie: React.FC = () => {
 
   const handleManualRetry = () => {
     setConnectionError(false);
-    // Force re-trigger of effect
-    const current = selectedFriend;
-    setSelectedFriend(null);
-    setTimeout(() => {
-        setSelectedFriend(current);
-        if(current) targetFriendIdRef.current = current.uid;
-    }, 100);
+    // Force re-trigger of effect via state change if needed, but clearing error is usually enough
+    // due to dependency array.
   };
 
   const isConnected = callStatus === CallStatus.CONNECTED;
