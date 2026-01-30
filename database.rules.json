@@ -4,6 +4,16 @@
     "calls": {
       ".read": "auth != null",
       ".write": "auth != null",
+      "$callId": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        "offerCandidates": {
+          ".write": "auth != null"
+        },
+        "answerCandidates": {
+          ".write": "auth != null"
+        }
+      },
       ".indexOn": ["calleeId", "status"]
     },
     "status": {

@@ -182,8 +182,8 @@ export class WebRTCService {
               await update(callRef, {
                   offer: { type: offer.type, sdp: offer.sdp }
               });
-          } catch (e) {
-              console.error("PulseRTC: ICE Restart failed", e);
+          } catch (e: any) {
+              console.error("PulseRTC: ICE Restart failed", e.message || e);
           } finally {
               this.isRenegotiating = false;
           }
@@ -247,8 +247,8 @@ export class WebRTCService {
         try {
            const candidatesRef = ref(rtdb, `calls/${callId}/offerCandidates`);
            await push(candidatesRef, event.candidate.toJSON());
-        } catch (e) {
-          console.error("PulseRTC: Error uploading caller candidate", e);
+        } catch (e: any) {
+          console.error("PulseRTC: Error uploading caller candidate", e.message || e);
         }
       }
     };
@@ -358,7 +358,9 @@ export class WebRTCService {
         try {
           const candidatesRef = ref(rtdb, `calls/${callId}/answerCandidates`);
           await push(candidatesRef, event.candidate.toJSON());
-        } catch (e) { }
+        } catch (e: any) {
+           console.error("PulseRTC: Error uploading answer candidate", e.message || e);
+        }
       }
     };
 
