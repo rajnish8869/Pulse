@@ -38,7 +38,10 @@ const WalkieTalkie: React.FC = () => {
   const [isHoldingButton, setIsHoldingButton] = useState(false);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [loadingFriends, setLoadingFriends] = useState(true);
+  
+  // New state to break infinite loops
   const [connectionError, setConnectionError] = useState(false);
+  
   const [onlineStatus, setOnlineStatus] = useState<Record<string, boolean>>({});
   
   // Track the target friend to ensure we don't start call for old selection
@@ -182,8 +185,6 @@ const WalkieTalkie: React.FC = () => {
       isSwitchingRef.current = false; // Reset switch flag
       setSelectedFriend(friend);
       targetFriendIdRef.current = friend.uid;
-      
-      // If we are already calling someone else, the main effect handles the teardown
   };
 
   // 5. Auto-Answer
@@ -193,8 +194,6 @@ const WalkieTalkie: React.FC = () => {
 
   const handleManualRetry = () => {
     setConnectionError(false);
-    // Force re-trigger of effect via state change if needed, but clearing error is usually enough
-    // due to dependency array.
   };
 
   const isConnected = callStatus === CallStatus.CONNECTED;
