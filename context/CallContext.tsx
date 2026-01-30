@@ -63,6 +63,10 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   // RTDB Listener references for cleanup
   const incomingListenerRef = useRef<{ ref: any, cb: any } | null>(null);
   const activeCallListenerRef = useRef<{ ref: any, cb: any } | null>(null);
+  
+  // Watchdog Timers
+  const offeringTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const ringingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const statusRef = useRef<CallStatus>(CallStatus.ENDED);
   const activeCallRef = useRef<CallSession | null>(null);
@@ -134,6 +138,32 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     osc.stop(ctx.currentTime + 0.2);
   };
 
+  // PHASE 3: RECEIVER-SIDE AUDIO GATE
+  // Strictly control the audio element mute state based on who is talking
+  useEffect(() => {
+    const audioEl = remoteAudioRef.current;
+    if (!audioEl || !user) return;
+
+    // Check if we are in a valid connected state
+    const isConnected = callStatus === CallStatus.CONNECTED;
+    
+    // Check if the ACTIVE SPEAKER is the remote person
+    // We only unmute if activeSpeakerId exists AND it is NOT us.
+    const isRemoteSpeaker = activeCall?.activeSpeakerId && activeCall.activeSpeakerId !== user.uid;
+
+    if (isConnected && isRemoteSpeaker) {
+        // UNMUTE
+        audioEl.muted = false;
+        // Ensure playback is active
+        if (audioEl.paused) {
+            audioEl.play().catch(e => console.warn("Audio play interrupted", e));
+        }
+    } else {
+        // MUTE (Default state)
+        audioEl.muted = true;
+    }
+  }, [activeCall?.activeSpeakerId, callStatus, user?.uid]);
+
   // LISTEN FOR INCOMING CALLS (RTDB)
   useEffect(() => {
     if (!user || !rtdb) return;
@@ -186,15 +216,35 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
         return;
       }
 
+      // 1. STATE: RINGING (Caller side, awaiting answer)
+      if (data.status === 'RINGING' && statusRef.current === CallStatus.OFFERING) {
+        setCallStatus(CallStatus.RINGING);
+        // Clear offering watchdog
+        if (offeringTimeoutRef.current) clearTimeout(offeringTimeoutRef.current);
+        // Start ringing watchdog (Wait for CONNECTING)
+        ringingTimeoutRef.current = setTimeout(() => {
+             console.log("Pulse: Call timed out waiting for answer");
+             endCall();
+        }, 15000);
+      }
+
+      // 2. STATE: CONNECTING (Key Exchange)
+      if (data.status === 'CONNECTING' && statusRef.current === CallStatus.RINGING) {
+        setCallStatus(CallStatus.CONNECTING);
+        // Clear ringing watchdog
+        if (ringingTimeoutRef.current) clearTimeout(ringingTimeoutRef.current);
+      }
+
+      // 3. STATE: CONNECTED
       if (data.status === 'CONNECTED' && statusRef.current !== CallStatus.CONNECTED) {
         setCallStatus(CallStatus.CONNECTED);
         playTone("ON");
+        // Ensure watchdogs are clear
+        if (offeringTimeoutRef.current) clearTimeout(offeringTimeoutRef.current);
+        if (ringingTimeoutRef.current) clearTimeout(ringingTimeoutRef.current);
       }
 
-      // CRITICAL FIX: Handle activeSpeakerId updates correctly.
-      // In RTDB, setting a value to null removes the key.
-      // So if 'activeSpeakerId' is undefined in 'data', it means it was set to null (stopped talking).
-      // We must explicitly default to null in that case to clear the state.
+      // Active Speaker Logic
       setActiveCall((prev) =>
         prev ? { ...prev, activeSpeakerId: data.activeSpeakerId || null } : null,
       );
@@ -215,20 +265,17 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   const makeCall = async (calleeId: string, calleeName: string) => {
     if (!user || !rtdb) return;
     
-    // Safety check: ensure previous call is fully cleared
     if (statusRef.current !== CallStatus.ENDED) {
-        console.warn("Attempted to make call while not ENDED");
         await endCall();
     }
     
     ensureAudioContext();
 
     try {
-      // Ensure media is ready and MUTED for PTT
+      // Ensure media is ready and MUTED
       const stream = await rtcRef.current.acquireMedia();
       stream.getAudioTracks().forEach(t => t.enabled = false);
 
-      // Setup PeerConnection with fresh event handlers
       rtcRef.current.createPeerConnection((remoteStream) => {
         setRemoteStream(remoteStream);
         if (remoteAudioRef.current) {
@@ -262,6 +309,16 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
 
       setActiveCall(callData);
       setCallStatus(CallStatus.OFFERING);
+
+      // Start Watchdog: If state doesn't change from OFFERING in 10s, abort
+      if (offeringTimeoutRef.current) clearTimeout(offeringTimeoutRef.current);
+      offeringTimeoutRef.current = setTimeout(() => {
+          if (statusRef.current === CallStatus.OFFERING) {
+              console.log("Pulse: Call timed out in OFFERING");
+              endCall();
+          }
+      }, 10000);
+
     } catch (e) {
       console.error("Error making walkie call:", e);
       cleanupCall();
@@ -274,7 +331,7 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     ensureAudioContext();
 
     try {
-      // Ensure media is ready and MUTED for PTT
+      // Ensure media is ready and MUTED
       const stream = await rtcRef.current.acquireMedia();
       stream.getAudioTracks().forEach(t => t.enabled = false);
 
@@ -290,7 +347,8 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
 
       setActiveCall(incomingCall);
       setIncomingCall(null);
-      setCallStatus(CallStatus.CONNECTED);
+      // We set local status to CONNECTING immediately as we have sent the answer
+      setCallStatus(CallStatus.CONNECTING);
     } catch (e) {
       console.error("Error answering walkie call:", e);
       cleanupCall();
@@ -322,16 +380,20 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   const cleanupCall = () => {
+    // Clear Timers
+    if (offeringTimeoutRef.current) clearTimeout(offeringTimeoutRef.current);
+    if (ringingTimeoutRef.current) clearTimeout(ringingTimeoutRef.current);
+    offeringTimeoutRef.current = null;
+    ringingTimeoutRef.current = null;
+
     statusRef.current = CallStatus.ENDED;
     activeCallRef.current = null;
 
     setCallStatus(CallStatus.ENDED);
     setActiveCall(null);
     setIncomingCall(null);
-    // Don't nullify localStream, we keep it for next call
     setRemoteStream(null);
 
-    // Clean up signaling but keep media stream
     rtcRef.current.endCurrentSession(activeCall?.callId || null);
   };
 

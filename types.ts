@@ -6,6 +6,7 @@ export enum CallType {
 export enum CallStatus {
   OFFERING = 'OFFERING',
   RINGING = 'RINGING',
+  CONNECTING = 'CONNECTING', // Key Exchange
   CONNECTED = 'CONNECTED',
   ENDED = 'ENDED',
   REJECTED = 'REJECTED',
