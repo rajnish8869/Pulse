@@ -48,6 +48,7 @@ export class WebRTCService {
   // Track current active call ID to preventing ghost signals
   private currentCallId: string | null = null;
   private isOfferer = false; // Role tracking for ICE restart
+  private isRenegotiating = false; // Prevent overlapping renegotiations
 
   constructor() {
     console.log("PulseRTC: Service initialized");
@@ -107,6 +108,7 @@ export class WebRTCService {
     this.remoteDescriptionSet = false;
     this.currentCallId = null;
     this.isOfferer = false;
+    this.isRenegotiating = false;
 
     // 3. Close PeerConnection
     if (this.peerConnection) {
@@ -161,11 +163,18 @@ export class WebRTCService {
   }
 
   private async handleConnectionFailure() {
-      console.warn("PulseRTC: Connection unstable. Attempting recovery...");
+      if (!this.peerConnection || !this.currentCallId) return;
+      
+      const state = this.peerConnection.connectionState;
+      console.warn(`PulseRTC: Connection unstable (${state}). Attempting recovery...`);
+      
       // Only the Offerer (Caller) initiates ICE Restart to avoid glare
-      if (this.isOfferer && this.currentCallId && this.peerConnection) {
+      // Also ensure we are stable before trying to restart
+      if (this.isOfferer && !this.isRenegotiating && this.peerConnection.signalingState === 'stable') {
+          this.isRenegotiating = true;
           try {
               console.log("PulseRTC: Creating ICE Restart Offer");
+              // Use explicit iceRestart
               const offer = await this.peerConnection.createOffer({ iceRestart: true });
               await this.peerConnection.setLocalDescription(offer);
               
@@ -175,6 +184,8 @@ export class WebRTCService {
               });
           } catch (e) {
               console.error("PulseRTC: ICE Restart failed", e);
+          } finally {
+              this.isRenegotiating = false;
           }
       }
   }
@@ -186,7 +197,7 @@ export class WebRTCService {
       if (this.processedCandidates.has(candStr)) return;
       this.processedCandidates.add(candStr);
 
-      if (this.remoteDescriptionSet) {
+      if (this.remoteDescriptionSet && this.peerConnection.remoteDescription) {
           try {
               await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidateInit));
           } catch (e) {
@@ -402,26 +413,30 @@ export class WebRTCService {
     // Listen for Offer Updates (Renegotiation / ICE Restart)
     const offerListener = onValue(callRef, async (snapshot) => {
         const data = snapshot.val();
-        if (this.currentCallId !== callId || !this.peerConnection || !data) return;
+        if (this.currentCallId !== callId || !this.peerConnection || !data || !data.offer) return;
+
+        const currentRemoteSdp = this.peerConnection.remoteDescription?.sdp;
+        const newOfferSdp = data.offer.sdp;
 
         // If we receive a new offer while in stable state (ICE Restart)
-        if (data.offer && this.peerConnection.signalingState === 'stable') {
-            if (data.offer.sdp !== this.peerConnection.remoteDescription?.sdp) {
-                console.log("PulseRTC: Detected new offer (ICE Restart)");
-                try {
-                    await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-                    this.remoteDescriptionSet = true;
-                    await this.processBufferedCandidates(); // Flush queue if any new candidates arrived for new offer
+        if (newOfferSdp && newOfferSdp !== currentRemoteSdp && this.peerConnection.signalingState === 'stable') {
+            console.log("PulseRTC: Detected new offer (ICE Restart)");
+            try {
+                // Ensure we explicitly set type to 'offer' to avoid "createAnswer not called" errors
+                // caused by implicit state issues or malformed objects.
+                const offerDesc = { type: 'offer' as RTCSdpType, sdp: newOfferSdp };
+                await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offerDesc));
+                this.remoteDescriptionSet = true;
+                await this.processBufferedCandidates(); 
 
-                    const newAnswer = await this.peerConnection.createAnswer();
-                    await this.peerConnection.setLocalDescription(newAnswer);
+                const newAnswer = await this.peerConnection.createAnswer();
+                await this.peerConnection.setLocalDescription(newAnswer);
 
-                    await update(callRef, {
-                        answer: { type: newAnswer.type, sdp: newAnswer.sdp }
-                    });
-                } catch(e) {
-                    console.error("PulseRTC: Error handling renegotiation", e);
-                }
+                await update(callRef, {
+                    answer: { type: newAnswer.type, sdp: newAnswer.sdp }
+                });
+            } catch(e) {
+                console.error("PulseRTC: Error handling renegotiation", e);
             }
         }
     });
