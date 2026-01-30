@@ -1,4 +1,3 @@
-
 import React, {
   createContext,
   useContext,
@@ -69,9 +68,9 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   const activeCallListenerRef = useRef<{ ref: any, cb: any } | null>(null);
   
   // Watchdog Timers
-  const offeringTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const ringingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const connectingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const offeringTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ringingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const statusRef = useRef<CallStatus>(CallStatus.ENDED);
   const activeCallRef = useRef<CallSession | null>(null);

@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from "react";
 import { useCall } from "../context/CallContext";
 import { CallStatus, UserProfile } from "../types";
@@ -42,7 +41,7 @@ const WalkieTalkie: React.FC = () => {
   const targetFriendIdRef = useRef<string | null>(null);
   const prevStatusRef = useRef<CallStatus>(CallStatus.ENDED);
   const isSwitchingRef = useRef(false);
-  const attemptTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const attemptTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [onlineStatus, setOnlineStatus] = useState<Record<string, boolean>>({});
 
@@ -331,7 +330,7 @@ const WalkieTalkie: React.FC = () => {
                      </div>
                      <div className="text-left">
                         <p className={`text-xs font-bold leading-none mb-0.5 ${isSelected ? "text-white" : "text-slate-300"}`}>{friend.displayName}</p>
-                        <p className="text-[10px] font-mono text-slate-500 uppercase">{isOnline ? "ON-AIR" : "OFF"}</p>
+                        <p className="text--[10px] font-mono text-slate-500 uppercase">{isOnline ? "ON-AIR" : "OFF"}</p>
                      </div>
                   </button>
                )
