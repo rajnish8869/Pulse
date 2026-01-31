@@ -1,4 +1,8 @@
+
 export const APP_NAME = "Pulse";
+
+// Replace this with your actual Vercel project URL
+export const BACKEND_URL = "https://your-pulse-api.vercel.app/api";
 
 export const STUN_SERVERS = {
   iceServers: [

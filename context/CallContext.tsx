@@ -13,14 +13,20 @@ import {
   onValue,
   update,
   off,
+  push,
+  set
 } from "firebase/database";
-import { rtdb } from "../services/firebase";
+import { rtdb, db } from "../services/firebase";
+import { doc, updateDoc, arrayUnion } from "firebase/firestore";
 import { useAuth } from "./AuthContext";
 import { CallSession, CallStatus, CallType } from "../types";
 import { WebRTCService } from "../services/WebRTCService";
 import { KeepAwake } from "@capacitor-community/keep-awake";
 import { AudioToggle } from "@anuradev/capacitor-audio-toggle";
 import { NativeAudio } from "@capacitor-community/native-audio";
+import { PushNotifications } from "@capacitor/push-notifications";
+import { Capacitor } from "@capacitor/core";
+import { BACKEND_URL } from "../constants";
 
 interface CallContextType {
   activeCall: CallSession | null;
@@ -140,6 +146,69 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
       };
       initAudioService();
   }, []);
+
+  // PHASE 5: FCM & Push Notifications
+  useEffect(() => {
+    if (!user || !Capacitor.isNativePlatform()) return;
+
+    const registerPush = async () => {
+      try {
+        const permStatus = await PushNotifications.requestPermissions();
+        
+        if (permStatus.receive === 'granted') {
+          await PushNotifications.register();
+        } else {
+          console.warn("Pulse: Push notification permission denied");
+        }
+      } catch (e) {
+        console.error("Pulse: Failed to register push", e);
+      }
+    };
+
+    registerPush();
+
+    const regListener = PushNotifications.addListener('registration', async (token) => {
+        console.log('Pulse: Push Registration Token:', token.value);
+        if (user && db) {
+            // Store token in Firestore using arrayUnion to support multiple devices
+            try {
+                await updateDoc(doc(db, 'users', user.uid), {
+                    fcmTokens: arrayUnion(token.value),
+                    lastTokenUpdate: Date.now()
+                });
+            } catch (e) {
+                console.error("Pulse: Failed to save FCM token", e);
+            }
+        }
+    });
+
+    const msgListener = PushNotifications.addListener('pushNotificationReceived', async (notification) => {
+        console.log('Pulse: Push Notification Received', notification);
+        
+        // WAKE UP LOGIC
+        // 1. Acquire Wake Lock immediately
+        try {
+            await KeepAwake.keepAwake();
+        } catch (e) {}
+
+        // 2. Ensure Audio Context is resumed
+        ensureAudioContext();
+
+        // 3. The existing RTDB listener will likely pick up the call change
+        // but we can optimize by checking the notification data if provided.
+        const data = notification.data;
+        if (data && data.callId) {
+            console.log("Pulse: Wake-up trigger for call", data.callId);
+            // Optional: If auto-answer didn't trigger via RTDB (e.g., latency),
+            // we could force a fetch here, but RTDB onValue is usually faster than FCM delivery.
+        }
+    });
+
+    return () => {
+        regListener.then(h => h.remove());
+        msgListener.then(h => h.remove());
+    };
+  }, [user]);
 
   // Monitor Call Status for Native Audio Mode & Wake Lock
   useEffect(() => {
@@ -397,6 +466,25 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
           calleeName,
         },
       );
+
+      // Phase 5: Send WAKE-UP Trigger via External API (Vercel)
+      try {
+          const idToken = await user.getIdToken();
+          await fetch(`${BACKEND_URL}/signal`, {
+              method: 'POST',
+              headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${idToken}`
+              },
+              body: JSON.stringify({
+                  calleeId,
+                  callId,
+                  callerName: user.displayName || "Unknown"
+              })
+          });
+      } catch (e) {
+          console.error("Pulse: Failed to send wake-up signal", e);
+      }
 
       const callData: CallSession = {
         callId,
