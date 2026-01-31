@@ -23,7 +23,6 @@ const WalkieTalkie: React.FC = () => {
     callStatus,
     incomingCall,
     ensureAudioContext,
-    answerCall,
     isMediaReady
   } = useCall();
   const { user } = useAuth();
@@ -36,14 +35,10 @@ const WalkieTalkie: React.FC = () => {
   // Connection Error State (UI)
   const [connectionError, setConnectionError] = useState(false);
   
-  // Refs for logic (Synchronous tracking to prevent loop races)
-  const connectionErrorRef = useRef(false);
-  const targetFriendIdRef = useRef<string | null>(null);
-  const prevStatusRef = useRef<CallStatus>(CallStatus.ENDED);
-  const isSwitchingRef = useRef(false);
-  const attemptTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const [onlineStatus, setOnlineStatus] = useState<Record<string, boolean>>({});
+  
+  // Track holding state to transmit as soon as connected
+  const isHoldingButtonRef = useRef(false);
 
   // 1. Fetch Friends & Status
   useEffect(() => {
@@ -99,117 +94,37 @@ const WalkieTalkie: React.FC = () => {
     };
   }, [user?.uid]);
 
-  // 2. Removed Automatic Selection
-  // We no longer auto-select the first friend. 
-  // The user must explicitly choose a channel to connect.
-
-  // 3. Centralized Connection Logic
-  useEffect(() => {
-    if (!selectedFriend || !user || !isMediaReady) return;
-    if (incomingCall) return; // Prioritize incoming
-
-    const currentActiveId = activeCall ? (activeCall.callerId === user.uid ? activeCall.calleeId : activeCall.callerId) : null;
-    const desiredId = selectedFriend.uid;
-
-    // A. Detect Failure (Transition from Connecting -> Ended)
-    const wasConnecting = prevStatusRef.current === CallStatus.OFFERING || 
-                          prevStatusRef.current === CallStatus.RINGING || 
-                          prevStatusRef.current === CallStatus.CONNECTING;
-    const isEnded = callStatus === CallStatus.ENDED || callStatus === CallStatus.REJECTED;
-
-    if (wasConnecting && isEnded) {
-        if (isSwitchingRef.current) {
-            // We expected this disconnect because we are switching channels
-            isSwitchingRef.current = false;
-        } else {
-            // Unexpected disconnect (Timeout, Error, Rejection)
-            console.log("Pulse: Connection failed/dropped. Halting auto-retry.");
-            connectionErrorRef.current = true;
-            setConnectionError(true);
-        }
-    }
-    prevStatusRef.current = callStatus;
-
-    // B. Connection Logic
-    // If we are already connected to the right person, clear errors
-    if (currentActiveId === desiredId && callStatus === CallStatus.CONNECTED) {
-        if (connectionErrorRef.current) {
-            connectionErrorRef.current = false;
-            setConnectionError(false);
-        }
-        return;
-    }
-
-    // If connected to WRONG person, end it.
-    if (activeCall && currentActiveId !== desiredId) {
-        console.log("Switching: Ending previous call");
-        isSwitchingRef.current = true;
-        endCall();
-        return; // Wait for ENDED state
-    }
-
-    // If idle, and we want to connect, and no error blocking
-    if (!activeCall && callStatus === CallStatus.ENDED) {
-        if (targetFriendIdRef.current === desiredId && !connectionErrorRef.current) {
-            // Debounce the makeCall slightly to allow state to settle
-            if (attemptTimeoutRef.current) clearTimeout(attemptTimeoutRef.current);
-            
-            attemptTimeoutRef.current = setTimeout(() => {
-                console.log("Switching: Starting new call to", desiredId);
-                makeCall(desiredId, selectedFriend.displayName)
-                    .catch((e) => {
-                        console.error("Connection failed", e);
-                        connectionErrorRef.current = true;
-                        setConnectionError(true);
-                    });
-            }, 500);
-        }
-    }
-    
-    return () => {
-        if (attemptTimeoutRef.current) clearTimeout(attemptTimeoutRef.current);
-    };
-
-  }, [selectedFriend, isMediaReady, activeCall, callStatus, incomingCall, user]);
-
-  // Handle manual selection change
+  // 2. Handle manual selection change
   const handleFriendSelect = (friend: UserProfile) => {
-      if (selectedFriend?.uid === friend.uid && !connectionError) return;
+      if (selectedFriend?.uid === friend.uid) return;
       
       console.log("Pulse: Selected channel", friend.displayName);
       
-      // Reset Error State
-      connectionErrorRef.current = false;
+      // If currently connected to someone else, end it? 
+      // "Ten Ten" keeps last channel active.
+      // If we switch channels, we should probably disconnect the current one to save battery/data
+      // unless we want to monitor multiple (not supported yet).
+      if (activeCall && callStatus === CallStatus.CONNECTED) {
+          endCall();
+      }
+      
       setConnectionError(false);
-      
-      // Reset Switching State
-      isSwitchingRef.current = false;
-      
       setSelectedFriend(friend);
-      targetFriendIdRef.current = friend.uid;
-      
-      // If idle, the effect will pick this up and connect.
-      // If connected to someone else, effect will tear down and connect.
-      // If in error state (retry), resetting error ref triggers effect.
   };
 
   const handleManualRetry = () => {
       console.log("Pulse: Manual Retry");
-      connectionErrorRef.current = false;
       setConnectionError(false);
-      // This will trigger the effect to try connecting again
-      if (selectedFriend) {
-          // Force a re-eval if dependencies didn't change enough
-          const current = selectedFriend;
-          setSelectedFriend(null);
-          setTimeout(() => setSelectedFriend(current), 10);
-      }
+      // PTT press will trigger connection
   };
 
-  // 5. Auto-Answer
+  // 3. Transmit on Connect if Holding
   useEffect(() => {
-    if (incomingCall && callStatus === CallStatus.RINGING) answerCall();
-  }, [incomingCall, callStatus]);
+      if (callStatus === CallStatus.CONNECTED && isHoldingButtonRef.current && !activeCall?.activeSpeakerId) {
+          console.log("Pulse: Connected while holding PTT. Transmitting...");
+          toggleTalk(true);
+      }
+  }, [callStatus]);
 
 
   // --- UI ---
@@ -226,14 +141,14 @@ const WalkieTalkie: React.FC = () => {
   let glowColor = "shadow-none";
   let statusText = "Ready";
   let showRetry = false;
-  let statusSubtext = "Establishing Link...";
+  let statusSubtext = "Hold to Speak";
   
   if (isHoldingButton) {
      stateColor = "text-rose-500";
      ringColor = "border-rose-500";
      glowColor = "shadow-[0_0_80px_rgba(244,63,94,0.4)]";
-     statusText = "TRANSMITTING";
-     statusSubtext = "Release to Listen";
+     statusText = isConnected ? "TRANSMITTING" : "OPENING CHANNEL...";
+     statusSubtext = isConnected ? "Release to Listen" : "Please Wait";
   } else if (isRemoteTalking) {
      stateColor = "text-emerald-500";
      ringColor = "border-emerald-500";
@@ -261,22 +176,46 @@ const WalkieTalkie: React.FC = () => {
      statusText = "STANDBY";
      statusSubtext = "Select a Channel";
   } else {
-     // Idle state but trying to connect (gap between effect runs)
-     statusText = "SEARCHING...";
+     statusText = "READY";
   }
 
-  const handleTouchStart = () => {
+  const handleTouchStart = async () => {
     ensureAudioContext();
-    if (!isConnected || isRemoteTalking) return;
+    if (!selectedFriend) return;
+    
     if (navigator.vibrate) navigator.vibrate(50);
     setIsHoldingButton(true);
-    toggleTalk(true);
+    isHoldingButtonRef.current = true;
+
+    // Wake-on-Signal Logic:
+    // If not connected, we initiate the call (Signal)
+    if (!isConnected && !isConnecting) {
+        console.log("Pulse: PTT pressed while idle. Signaling...");
+        try {
+            await makeCall(selectedFriend.uid, selectedFriend.displayName);
+            // The useEffect will catch the transition to CONNECTED and trigger toggleTalk
+        } catch (e) {
+            console.error("Pulse: Signaling failed", e);
+            setConnectionError(true);
+            setIsHoldingButton(false);
+            isHoldingButtonRef.current = false;
+        }
+    } else if (isConnected && !isRemoteTalking) {
+        toggleTalk(true);
+    }
   };
 
   const handleTouchEnd = () => {
-    if (!isHoldingButton) return;
     setIsHoldingButton(false);
-    toggleTalk(false);
+    isHoldingButtonRef.current = false;
+    
+    if (isConnected) {
+        toggleTalk(false);
+    }
+    // Note: We do NOT end the call here. 
+    // The "Ten Ten" style is to keep the channel open for a while or until the user leaves/switches.
+    // However, to strictly follow "Wake-on-Signal" for battery, we *could* disconnect after a timeout.
+    // For now, we leave it open as per standard PTT session behavior, assuming the user might reply.
   };
 
   if (!isMediaReady) {
@@ -346,7 +285,7 @@ const WalkieTalkie: React.FC = () => {
              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-slate-900 border border-white/5 shadow-xl">
                  {connectionError ? <WifiOff size={14} className="text-red-500" /> : <Signal size={14} className={isConnected ? "text-primary" : "text-slate-600"} />}
                  <span className={`text-[10px] font-black tracking-widest uppercase ${isConnected ? "text-white" : "text-slate-500"}`}>
-                    {connectionError ? "LINK FAILED" : isConnected ? "LINK ESTABLISHED" : !selectedFriend ? "STANDBY" : "SEARCHING..."}
+                    {connectionError ? "LINK FAILED" : isConnected ? "LINK ESTABLISHED" : !selectedFriend ? "STANDBY" : isConnecting ? "SEARCHING..." : "READY"}
                  </span>
              </div>
          </div>

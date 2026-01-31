@@ -78,6 +78,9 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   const statusRef = useRef<CallStatus>(CallStatus.ENDED);
   const activeCallRef = useRef<CallSession | null>(null);
 
+  // Use a ref to access the current function without circular dependencies
+  const answerCallRef = useRef<() => Promise<void>>(() => Promise.resolve());
+
   useEffect(() => {
     statusRef.current = callStatus;
   }, [callStatus]);
@@ -253,11 +256,18 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
        if (!calls) return;
 
        Object.values(calls).forEach((data: any) => {
+          // PHASE 4: AUTO-ANSWER (Wake-on-Signal)
           if (data.status === 'OFFERING') {
              // Only accept if we are free OR if it's the same call ID we are managing
              if (statusRef.current === CallStatus.ENDED && !activeCallRef.current) {
+                console.log("Pulse: Incoming call detected. Auto-answering...");
                 setIncomingCall(data as CallSession);
+                // Immediately transition to RINGING (which triggers answer logic implicitly or explicitly)
                 setCallStatus(CallStatus.RINGING);
+                
+                // TRIGGER ANSWER IMMEDIATELY
+                // We use the ref to call the function to avoid useEffect dependency cycle
+                answerCallRef.current().catch(e => console.error("Auto-answer failed:", e));
              }
           }
        });
@@ -411,42 +421,112 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   const answerCall = async () => {
-    if (!incomingCall || !user || !rtdb) return;
+    // Note: This relies on incomingCall state being set by the listener
+    // In the auto-answer flow, incomingCall is set just before this is called.
+    
+    // Check if we have an incoming call data either in state or pass it?
+    // Since we are calling this from the listener loop where we *just* called setIncomingCall,
+    // the state update might not have flushed yet.
+    // However, for simplicity, we will trust the state update or refetch.
+    // Actually, due to closure, inside useEffect `incomingCall` might be stale.
+    // We should probably pass the callId or object if calling directly.
+    // But refactoring signature might break other things.
+    // Let's rely on the fact that we set state.
+    
+    // Better approach: We need to grab the latest incoming call from the ref or arg.
+    // Since we can't easily change the signature in the Context interface without ripple effects,
+    // let's assume `incomingCall` state will be available or use a ref for it.
+    
+    // Wait a tick for state to update? No, that's flaky.
+    // Let's modify the flow: The listener calls `setIncomingCall`, then calls `answerCall`.
+    // Inside `answerCall`, we should check `incomingCall`.
+    
+    // CRITICAL FIX: Since state updates are async, `incomingCall` will be null when called synchronously from listener.
+    // We will use a temporary local variable or ref in the context to hold the "pending answer" call if needed,
+    // OR, more robustly, we change `answerCall` to accept an optional argument.
+    
+    // BUT, since we cannot easily change the Interface exported to consumers without updating them,
+    // let's try to fetch the needed data from the listener's scope or RTDB if needed.
+    // Actually, `activeCall` and `incomingCall` are state.
+    
+    // Let's try this:
+    // When listener triggers, it sets `activeCall` immediately to the incoming call data (as if we accepted it),
+    // skipping `incomingCall` state entirely for auto-answers?
+    // No, `answerCall` logic relies on `incomingCall`.
+    
+    // Let's modify `answerCall` to use the `activeCallRef` or `incomingCall` state, but we need to ensure it's set.
+    // Since we can't guarantee state update, let's use a workaround:
+    // The listener loop has the data `data`.
+    // We will update `answerCall` to look for the pending call.
+    
+    if (!user || !rtdb) return;
     ensureAudioContext();
 
-    try {
-      const service = rtcRef.current!;
-      // Ensure media is ready and MUTED
-      const stream = await service.acquireMedia();
-      stream.getAudioTracks().forEach(t => t.enabled = false);
-
-      service.createPeerConnection((remoteStream) => {
-        setRemoteStream(remoteStream);
-        if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = remoteStream;
-          remoteAudioRef.current.play().catch(() => {});
-        }
-      });
-
-      await service.answerCall(incomingCall.callId);
-
-      setActiveCall(incomingCall);
-      setIncomingCall(null);
-      // We set local status to CONNECTING immediately as we have sent the answer
-      setCallStatus(CallStatus.CONNECTING);
-      
-      // Start Connecting Watchdog locally as well
-      if (connectingTimeoutRef.current) clearTimeout(connectingTimeoutRef.current);
-      connectingTimeoutRef.current = setTimeout(() => {
-          console.log("Pulse: Answered call timed out in CONNECTING phase");
-          endCall();
-      }, 20000);
-
-    } catch (e) {
-      console.error("Error answering walkie call:", e);
-      cleanupCall();
-    }
+    // Use state if available, otherwise try to find pending
+    // This part is tricky with React batching.
+    // We'll rely on the `useEffect` on `incomingCall` in `WalkieTalkie`? NO, we moved away from that.
+    
+    // Let's assume `answerCall` is called. We need the ID.
+    // We can't access `data` from here.
+    // We will use a `pendingAnswerId` ref?
+    
+    // Alternative: Just set `activeCall` directly in the listener and start the WebRTC process there?
+    // That duplicates logic.
+    
+    // Let's change `answerCall` to be flexible.
+    // We can't change the context signature easily in the XML output without changing the interface.
+    // Wait, I CAN change the interface in the `context/CallContext.tsx` file update!
+    
+    // I will modify `answerCall` to take optional call data.
   };
+  
+  const answerCallInternal = async (callDataOverride?: CallSession) => {
+      const callToAnswer = callDataOverride || incomingCall;
+      
+      if (!callToAnswer || !user || !rtdb) {
+          console.warn("Pulse: answerCall called but no call found");
+          return;
+      }
+      
+      ensureAudioContext();
+
+      try {
+        const service = rtcRef.current!;
+        // Ensure media is ready and MUTED
+        const stream = await service.acquireMedia();
+        stream.getAudioTracks().forEach(t => t.enabled = false);
+
+        service.createPeerConnection((remoteStream) => {
+          setRemoteStream(remoteStream);
+          if (remoteAudioRef.current) {
+            remoteAudioRef.current.srcObject = remoteStream;
+            remoteAudioRef.current.play().catch(() => {});
+          }
+        });
+
+        await service.answerCall(callToAnswer.callId);
+
+        setActiveCall(callToAnswer);
+        setIncomingCall(null);
+        setCallStatus(CallStatus.CONNECTING);
+        
+        // Start Connecting Watchdog
+        if (connectingTimeoutRef.current) clearTimeout(connectingTimeoutRef.current);
+        connectingTimeoutRef.current = setTimeout(() => {
+            console.log("Pulse: Answered call timed out in CONNECTING phase");
+            endCall();
+        }, 20000);
+
+      } catch (e) {
+        console.error("Error answering walkie call:", e);
+        cleanupCall();
+      }
+  };
+  
+  // Assign the internal implementation to the ref so useEffect can call it
+  useEffect(() => {
+      answerCallRef.current = answerCallInternal;
+  }, [incomingCall, user]); // Dependencies
 
   const toggleTalk = async (isTalking: boolean) => {
     if (!activeCall || !rtdb || !user) return;
@@ -515,6 +595,43 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     setCallStatus(CallStatus.ENDED);
   };
 
+  // Modify the listener to pass the data directly
+  useEffect(() => {
+    if (!user || !rtdb) return;
+    
+    const callsRef = query(
+        ref(rtdb, 'calls'), 
+        orderByChild('calleeId'), 
+        equalTo(user.uid)
+    );
+
+    const cb = onValue(callsRef, (snapshot) => {
+       const calls = snapshot.val();
+       if (!calls) return;
+
+       Object.values(calls).forEach((data: any) => {
+          if (data.status === 'OFFERING') {
+             if (statusRef.current === CallStatus.ENDED && !activeCallRef.current) {
+                console.log("Pulse: Incoming call detected. Auto-answering...");
+                const callSession = data as CallSession;
+                setIncomingCall(callSession);
+                setCallStatus(CallStatus.RINGING);
+                
+                // Directly call the internal answer function with the data
+                // This bypasses the state update lag
+                answerCallInternal(callSession).catch(e => console.error("Auto-answer failed:", e));
+             }
+          }
+       });
+    });
+
+    incomingListenerRef.current = { ref: callsRef, cb };
+
+    return () => {
+       off(callsRef, 'value', cb);
+    };
+  }, [user?.uid]);
+
   return (
     <CallContext.Provider
       value={{
@@ -522,7 +639,7 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
         incomingCall,
         callStatus,
         makeCall,
-        answerCall,
+        answerCall: () => answerCallInternal(), // Expose the internal function
         rejectCall,
         endCall,
         toggleTalk,
