@@ -123,9 +123,12 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
                   audioChannelNum: 1,
                   isUrl: false
               });
-              await NativeAudio.loop({
+              await NativeAudio.setVolume({
                   assetId: 'keep_alive',
                   volume: 0.01 // Minimal volume to keep channel open without being audible
+              });
+              await NativeAudio.loop({
+                  assetId: 'keep_alive'
               });
               console.log("Pulse: Silent audio loop started");
           } catch (e) {
@@ -144,9 +147,13 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
               try {
                   await KeepAwake.keepAwake();
                   // Switch Android Audio Mode to IN_COMMUNICATION (VoIP)
-                  await AudioToggle.setAudioMode({ mode: 'communication' });
-                  // Force Speakerphone for Walkie Talkie usage
-                  await AudioToggle.setSpeakerphoneOn(true);
+                  try {
+                    await AudioToggle.setAudioMode({ mode: 'communication' });
+                    // Force Speakerphone for Walkie Talkie usage
+                    await AudioToggle.setSpeakerphoneOn(true);
+                  } catch (audioErr) {
+                    console.warn("Pulse: AudioToggle not supported or failed", audioErr);
+                  }
               } catch (e) {
                   console.error("Pulse: Error setting call audio mode:", e);
               }
@@ -155,7 +162,11 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
               console.log("Pulse: Reverting Audio Mode");
               try {
                   await KeepAwake.allowSleep();
-                  await AudioToggle.setAudioMode({ mode: 'normal' });
+                  try {
+                    await AudioToggle.setAudioMode({ mode: 'normal' });
+                  } catch (audioErr) {
+                    console.warn("Pulse: AudioToggle reset failed", audioErr);
+                  }
               } catch (e) {
                   console.error("Pulse: Error resetting audio mode:", e);
               }
