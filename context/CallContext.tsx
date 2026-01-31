@@ -18,6 +18,9 @@ import { rtdb } from "../services/firebase";
 import { useAuth } from "./AuthContext";
 import { CallSession, CallStatus, CallType } from "../types";
 import { WebRTCService } from "../services/WebRTCService";
+import { KeepAwake } from "@capacitor-community/keep-awake";
+import { AudioToggle } from "@anuradev/capacitor-audio-toggle";
+import { NativeAudio } from "@capacitor-community/native-audio";
 
 interface CallContextType {
   activeCall: CallSession | null;
@@ -107,6 +110,59 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
       }
     };
   }, []);
+
+  // PHASE 3: Audio Management & Keep Alive
+  useEffect(() => {
+      const initAudioService = async () => {
+          try {
+              // 1. Start Silent Loop to keep AudioContext active in background
+              // Note: Ensure 'silent.mp3' exists in public/assets/ or public/
+              await NativeAudio.preload({
+                  assetId: 'keep_alive',
+                  assetPath: 'silent.mp3',
+                  audioChannelNum: 1,
+                  isUrl: false
+              });
+              await NativeAudio.loop({
+                  assetId: 'keep_alive',
+                  volume: 0.01 // Minimal volume to keep channel open without being audible
+              });
+              console.log("Pulse: Silent audio loop started");
+          } catch (e) {
+              console.warn("Pulse: Silent Audio Loop failed (Check assets/silent.mp3):", e);
+          }
+      };
+      initAudioService();
+  }, []);
+
+  // Monitor Call Status for Native Audio Mode & Wake Lock
+  useEffect(() => {
+      const handleCallState = async () => {
+          if (callStatus === CallStatus.CONNECTED) {
+              // Connected: Acquire WakeLock & Switch to Voice Call Audio Mode
+              console.log("Pulse: Enabling Voice Call Mode & WakeLock");
+              try {
+                  await KeepAwake.keepAwake();
+                  // Switch Android Audio Mode to IN_COMMUNICATION (VoIP)
+                  await AudioToggle.setAudioMode({ mode: 'communication' });
+                  // Force Speakerphone for Walkie Talkie usage
+                  await AudioToggle.setSpeakerphoneOn(true);
+              } catch (e) {
+                  console.error("Pulse: Error setting call audio mode:", e);
+              }
+          } else if (callStatus === CallStatus.ENDED || callStatus === CallStatus.REJECTED) {
+              // Disconnected: Release WakeLock & Revert Audio Mode
+              console.log("Pulse: Reverting Audio Mode");
+              try {
+                  await KeepAwake.allowSleep();
+                  await AudioToggle.setAudioMode({ mode: 'normal' });
+              } catch (e) {
+                  console.error("Pulse: Error resetting audio mode:", e);
+              }
+          }
+      };
+      handleCallState();
+  }, [callStatus]);
 
   const ensureAudioContext = () => {
     if (!audioContextRef.current) {

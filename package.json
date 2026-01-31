@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@anuradev/capacitor-background-mode": "^7.2.1",
+    "@capacitor-community/keep-awake": "^5.0.0",
+    "@capacitor-community/native-audio": "^6.0.0",
     "@capacitor/android": "^7.1.0",
     "@capacitor/core": "^7.1.0",
 
@@ -19,6 +21,7 @@
     "@capacitor/keyboard": "~7.0.0",
     "@capacitor/status-bar": "~7.0.0",
 
+    "capacitor-plugin-audiotoggle": "^3.0.4",
     "firebase": "^10.8.1",
     "lucide-react": "^0.344.0",
     "react": "^18.2.0",
