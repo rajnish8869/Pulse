@@ -335,6 +335,12 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
        Object.values(calls).forEach((data: any) => {
           // PHASE 4: AUTO-ANSWER (Wake-on-Signal)
           if (data.status === 'OFFERING') {
+             // Check for stale calls (older than 60s)
+             const callAge = Date.now() - (data.timestamp || 0);
+             if (callAge > 60000) {
+                 return;
+             }
+
              // Only accept if we are free OR if it's the same call ID we are managing
              if (statusRef.current === CallStatus.ENDED && !activeCallRef.current) {
                 console.log("Pulse: Incoming call detected. Auto-answering...");
@@ -470,6 +476,7 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
       // Phase 5: Send WAKE-UP Trigger via External API (Vercel)
       try {
           const idToken = await user.getIdToken();
+          const timestamp = Date.now();
           await fetch(`${BACKEND_URL}/signal`, {
               method: 'POST',
               headers: {
@@ -479,7 +486,8 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
               body: JSON.stringify({
                   calleeId,
                   callId,
-                  callerName: user.displayName || "Unknown"
+                  callerName: user.displayName || "Unknown",
+                  timestamp // Send timestamp to prevent stale requests
               })
           });
       } catch (e) {

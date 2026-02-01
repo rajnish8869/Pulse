@@ -65,10 +65,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const callerUid = decodedToken.uid;
 
     // 3. Extract Payload
-    const { calleeId, callId, callerName } = req.body;
+    const { calleeId, callId, callerName, timestamp } = req.body;
 
     if (!calleeId || !callId) {
       return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // 3.1 Check for Stale Request (Prevent ghost calls from queued requests)
+    if (timestamp) {
+        const now = Date.now();
+        const reqTime = Number(timestamp);
+        // Reject if request is older than 60 seconds (accounting for some clock drift)
+        if (!isNaN(reqTime) && (now - reqTime > 60000)) {
+             console.warn(`Pulse Backend: Rejected stale signal (Age: ${now - reqTime}ms)`);
+             return res.status(200).json({ message: 'Request Timeout: Signal is stale', ignored: true });
+        }
     }
 
     // 4. Retrieve Callee's FCM Tokens

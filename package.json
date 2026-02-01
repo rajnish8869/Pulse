@@ -12,7 +12,7 @@
   "dependencies": {
     "@anuradev/capacitor-background-mode": "^7.2.1",
     "@capacitor-community/keep-awake": "^7.1.0",
-    "@capacitor-community/native-audio": "^8.0.0",
+    "@capacitor-community/native-audio": "^7.0.0",
     "@anuradev/capacitor-audio-toggle": "^7.0.0",
     "@capacitor/push-notifications": "^7.0.0",
     "@capacitor/android": "^7.0.0",
