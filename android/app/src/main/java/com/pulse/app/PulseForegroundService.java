@@ -55,7 +55,7 @@ public class PulseForegroundService extends Service {
         Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Pulse Incoming")
                 .setContentText(contentText)
-                .setSmallIcon(android.R.drawable.stat_sys_phone_call)
+                .setSmallIcon(R.drawable.ic_call_notification) // ✅ MUST be app drawable
                 .setContentIntent(contentIntent)
                 .setFullScreenIntent(fullScreenIntent, true) // 🔥 REQUIRED FOR CALL UI
                 .setPriority(NotificationCompat.PRIORITY_MAX)
