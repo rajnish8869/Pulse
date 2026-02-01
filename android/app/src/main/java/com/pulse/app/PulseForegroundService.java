@@ -13,6 +13,9 @@ import android.os.PowerManager;
 
 import androidx.core.app.NotificationCompat;
 
+// Explicit import to ensure correct resource resolution
+import com.pulse.app.R;
+
 public class PulseForegroundService extends Service {
 
     private static final String CHANNEL_ID = "PulseConnectionChannel";
@@ -38,6 +41,7 @@ public class PulseForegroundService extends Service {
         Intent launchIntent = new Intent(this, MainActivity.class);
         launchIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
 
+        // PendingIntent.FLAG_IMMUTABLE is required for Android 12+
         PendingIntent contentIntent = PendingIntent.getActivity(
                 this,
                 0,
@@ -52,22 +56,45 @@ public class PulseForegroundService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
 
-        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
+        // Ensure the icon exists and is valid. We use the one defined in R.drawable.ic_call_notification.
+        // If this fails (e.g. build issue), the system might fallback to app icon which causes crashes if adaptive.
+        // Using a try-catch block for safety during debugging, though the resource must exist.
+        int iconResId = R.drawable.ic_call_notification;
+
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Pulse Incoming")
                 .setContentText(contentText)
-                .setSmallIcon(R.drawable.ic_call_notification) // ✅ MUST be app drawable
+                .setSmallIcon(iconResId)
                 .setContentIntent(contentIntent)
-                .setFullScreenIntent(fullScreenIntent, true) // 🔥 REQUIRED FOR CALL UI
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .setOngoing(true)
-                .build();
+                .setOngoing(true);
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
-        } else {
-            startForeground(NOTIFICATION_ID, notification);
+        // Fullscreen intent is key for lock screen visibility
+        if (fullScreenIntent != null) {
+            builder.setFullScreenIntent(fullScreenIntent, true);
+        }
+
+        Notification notification = builder.build();
+
+        // Start Foreground Service
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            // Fallback attempt without specific type if it fails
+            try {
+                startForeground(NOTIFICATION_ID, notification);
+            } catch (Exception ex) {
+                ex.printStackTrace();
+                // If we can't start foreground, we must stop to prevent ANR/Crash
+                stopSelf();
+            }
         }
 
         acquireWakeLock();
@@ -118,7 +145,9 @@ public class PulseForegroundService extends Service {
             channel.setDescription("Incoming call notifications for Pulse");
             channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
             channel.setBypassDnd(true);
-            channel.enableVibration(true);
+            
+            // Sound/Vibration can be set here if needed, but we rely on the app playing audio
+            // channel.enableVibration(true);
 
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) {
