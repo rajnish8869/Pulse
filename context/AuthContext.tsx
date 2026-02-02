@@ -1,4 +1,3 @@
-
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { 
   User, 
@@ -8,7 +7,7 @@ import {
   updateProfile, 
   signOut as firebaseSignOut 
 } from 'firebase/auth';
-import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, setDoc, getDoc, serverTimestamp, updateDoc, arrayRemove } from 'firebase/firestore';
 import { auth, db } from '../services/firebase';
 
 interface AuthContextType {
@@ -127,6 +126,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signOut = async () => {
     if (!auth) return;
+
+    // Cleanup FCM Token before signing out
+    // This prevents the backend from sending notifications to a device that is no longer logged in
+    const currentUser = auth.currentUser;
+    if (currentUser && db) {
+        const token = localStorage.getItem('pulse_fcm_token');
+        if (token) {
+            try {
+                console.log("Auth: Removing FCM token before logout");
+                await updateDoc(doc(db, 'users', currentUser.uid), {
+                    fcmTokens: arrayRemove(token)
+                });
+            } catch (e) {
+                console.error("Auth: Failed to remove FCM token on logout", e);
+            }
+        }
+    }
+
+    // Clear local storage token reference
+    localStorage.removeItem('pulse_fcm_token');
+
     await firebaseSignOut(auth);
   };
 

@@ -169,6 +169,9 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
 
     const regListener = PushNotifications.addListener('registration', async (token) => {
         console.log('Pulse: Push Registration Token:', token.value);
+        // Store token locally so we can remove it on logout
+        localStorage.setItem('pulse_fcm_token', token.value);
+
         if (user && db) {
             // Store token in Firestore using arrayUnion to support multiple devices
             try {
